@@ -33,46 +33,28 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
         (1, -1, -1)
     ]
     
-    P_glcm_raw = torch.zeros((max_gl, max_gl, len(angles)), dtype=torch.float64, device=device)
-    
-    img_int = binned_image.to(torch.int64) * (mask_tensor > 0.5)
-    
-    for a_idx, (dz, dy, dx) in enumerate(angles):
-        z, y, x = torch.nonzero(mask_tensor > 0.5, as_tuple=True)
-        
-        z_shift = z + dz
-        y_shift = y + dy
-        x_shift = x + dx
-        
-        D, H, W = image_tensor.shape
-        valid = (z_shift >= 0) & (z_shift < D) & \
-                (y_shift >= 0) & (y_shift < H) & \
-                (x_shift >= 0) & (x_shift < W)
-                
-        z_v, y_v, x_v = z[valid], y[valid], x[valid]
-        zs_v, ys_v, xs_v = z_shift[valid], y_shift[valid], x_shift[valid]
-        
-        mask_valid = mask_tensor[zs_v, ys_v, xs_v] > 0.5
-        
-        z_v = z_v[mask_valid]
-        y_v = y_v[mask_valid]
-        x_v = x_v[mask_valid]
-        zs_v = zs_v[mask_valid]
-        ys_v = ys_v[mask_valid]
-        xs_v = xs_v[mask_valid]
-        
-        if z_v.numel() == 0:
-            continue
-            
-        val1 = img_int[z_v, y_v, x_v] - 1
-        val2 = img_int[zs_v, ys_v, xs_v] - 1
-        
-        linear_indices = val1 * max_gl + val2
-        counts = torch.bincount(linear_indices, minlength=max_gl*max_gl).to(torch.float64)
-        counts = counts[:max_gl*max_gl].view(max_gl, max_gl)
-        counts_sym = counts + counts.T
-        P_glcm_raw[:, :, a_idx] = counts_sym
-        
+    # Co-occurrence counts for all 13 directions with one bincount: ROI
+    # coordinates are computed once, every (voxel, neighbour) pair inside the
+    # ROI is encoded as angle*Ng^2 + i*Ng + j, and the symmetric matrix is
+    # counts + counts^T, exactly as the per-direction loop did.
+    M = mask_tensor > 0.5
+    img_int = binned_image.to(torch.int64) * M
+    D, H, W = image_tensor.shape
+    coords = torch.nonzero(M)                                    # (N, 3)
+    d_t = torch.tensor(angles, dtype=torch.int64, device=device)  # (13, 3)
+    N_angles = d_t.shape[0]
+    nb = coords.unsqueeze(0) + d_t.unsqueeze(1)                  # (13, N, 3)
+    inb = (nb >= 0).all(-1) & (nb[..., 0] < D) & (nb[..., 1] < H) & (nb[..., 2] < W)
+    nb = torch.where(inb.unsqueeze(-1), nb, torch.zeros_like(nb))
+    nb_in_roi = inb & M[nb[..., 0], nb[..., 1], nb[..., 2]]
+    v1 = img_int[coords[:, 0], coords[:, 1], coords[:, 2]].unsqueeze(0).expand(N_angles, -1) - 1
+    v2 = img_int[nb[..., 0], nb[..., 1], nb[..., 2]] - 1
+    ang = torch.arange(N_angles, device=device).view(-1, 1).expand(-1, coords.shape[0])
+    lin = ((ang * max_gl + v1) * max_gl + v2)[nb_in_roi]
+    counts = torch.bincount(lin, minlength=N_angles * max_gl * max_gl)[: N_angles * max_gl * max_gl]
+    counts = counts.view(N_angles, max_gl, max_gl).to(torch.float64)
+    P_glcm_raw = (counts + counts.transpose(1, 2)).permute(1, 2, 0)  # (Ng, Ng, 13)
+
     valid_idx = (ivector - 1).to(torch.int64)
     P_glcm = P_glcm_raw[valid_idx][:, valid_idx]
     
@@ -195,35 +177,30 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
     imc1 = torch.mean(imc1_vals)
     imc2 = torch.mean(torch.sqrt(torch.clamp(1 - torch.exp(-2.0 * (HXY2 - HXY)), min=0.0)))
     
-    mcc_list = []
-    for a in range(N_a):
-        p_a = p[:,:,a]
-        px_a = px[:,a].view(-1, 1)
-        py_a = py[:,a].view(1, -1)
-        
-        mask_x = px_a.squeeze() > EPSILON
-        
-        valid_idx = mask_x.nonzero().squeeze(-1)
-        if valid_idx.numel() < 2:
-            mcc_list.append(1.0)
-            continue
-            
-        p_valid = p_a[valid_idx][:, valid_idx]
-        px_valid = px_a[valid_idx]
-        
-        A = p_valid / px_valid
+    # MCC: one small eigenproblem per angle; solved on the CPU, where
+    # tiny dense eigensolvers are far cheaper than GPU solver launches.
+    p_cpu, px_cpu = p.detach().cpu(), px.detach().cpu()
+    # Angles with the same set of valid grey levels are solved in one batched
+    # eigvals call (same LAPACK routine per matrix, so identical results).
+    groups: dict = {}
+    for ang in range(N_a):
+        valid = (px_cpu[:, ang] > EPSILON).nonzero().squeeze(-1)
+        groups.setdefault(tuple(valid.tolist()), []).append(ang)
+    mcc_by_angle = [1.0] * N_a
+    for valid_t, angs in groups.items():
+        if len(valid_t) < 2:
+            continue  # MCC = 1.0
+        idx = torch.tensor(valid_t, dtype=torch.int64)
+        A = p_cpu[idx][:, idx][:, :, angs].permute(2, 0, 1) / px_cpu[idx][:, angs].T.unsqueeze(-1)
         Q = torch.matmul(A, A)
-        
         try:
-            evs = torch.linalg.eigvals(Q).real
-            evs = torch.sort(evs, descending=True).values
-            if len(evs) >= 2:
-                mcc_list.append(math.sqrt(evs[1]))
-            else:
-                mcc_list.append(1.0)
-        except:
-            mcc_list.append(1.0)
-            
+            evs = torch.sort(torch.linalg.eigvals(Q).real, dim=-1, descending=True).values
+            for k, ang in enumerate(angs):
+                mcc_by_angle[ang] = math.sqrt(evs[k, 1])
+        except Exception:
+            pass  # keep 1.0, as before
+    mcc_list = mcc_by_angle
+
     mcc = sum(mcc_list) / len(mcc_list) if mcc_list else 1.0
     
     features = {

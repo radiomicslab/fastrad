@@ -1,6 +1,23 @@
+import contextvars
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
+
+# Per-extraction memo for get_binned_image: five texture classes bin the same
+# cropped image with the same settings. Active only inside
+# FeatureExtractor.extract (see binning_cache), so results can never leak
+# between extractions.
+_BIN_CACHE: contextvars.ContextVar = contextvars.ContextVar("fastrad_bin_cache", default=None)
+
+
+@contextmanager
+def binning_cache():
+    token = _BIN_CACHE.set({})
+    try:
+        yield
+    finally:
+        _BIN_CACHE.reset(token)
 
 from .utils.dicom import parse_dicom_dir
 
@@ -63,12 +80,13 @@ class Mask:
     Representation of a binary 3D Region of Interest (ROI) mask.
     
     Attributes:
-        tensor (torch.Tensor): The 3D binary mask array as a PyTorch FloatTensor.
+        tensor (torch.Tensor): The 3D binary mask as a uint8 tensor with values {0, 1}.
         spacing (Tuple[float, float, float]): The physical voxel dimensions (z, y, x).
     """
     def __init__(self, tensor: torch.Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)):
-        # Ensure mask is binary (0 or 1)
-        self.tensor = (tensor > 0).to(torch.float32)
+        # Binary mask stored as uint8 {0, 1}: a quarter of the memory of float32,
+        # so locating the ROI in a full CT volume reads 4x fewer bytes.
+        self.tensor = (tensor > 0).to(torch.uint8)
         self.spacing = spacing
 
     def to(self, device: str | torch.device) -> "Mask":
@@ -130,6 +148,19 @@ def get_binned_image(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, bin_
         binned_image (torch.Tensor): Remapped binned image
         Ng (torch.Tensor): The array of unique raw bin values present in the mask (ivector)
     """
+    cache = _BIN_CACHE.get()
+    if cache is not None:
+        key = (id(image_tensor), id(mask_tensor), float(bin_width))
+        hit = cache.get(key)
+        if hit is not None and hit[0] is image_tensor and hit[1] is mask_tensor:
+            return hit[2]
+        result = _get_binned_image(image_tensor, mask_tensor, bin_width)
+        cache[key] = (image_tensor, mask_tensor, result)
+        return result
+    return _get_binned_image(image_tensor, mask_tensor, bin_width)
+
+
+def _get_binned_image(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, bin_width: float) -> tuple[torch.Tensor, torch.Tensor]:
     voxels = image_tensor[mask_tensor > 0.5]
     if voxels.numel() == 0:
         return torch.zeros_like(image_tensor), torch.empty(0, dtype=torch.float64, device=image_tensor.device)

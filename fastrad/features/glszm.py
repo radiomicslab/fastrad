@@ -6,10 +6,20 @@ from fastrad.settings import FeatureSettings
 
 EPSILON = 1e-16
 
+# Upper bound on voxels labelled per call (levels x crop size); ~64 M int32
+# voxels keeps the labelling buffer near 256 MB.
+_LABEL_BATCH_VOXELS = 64_000_000
+
 import numpy as np
 
 
+# Which labelling backend ran last ("cupy" or "scipy"). Benchmarks read this to
+# confirm GPU runs really used on-device labelling (the fallback is silent).
+LAST_LABEL_BACKEND: str | None = None
+
+
 def _label_connected_components(mask_tensor: torch.Tensor) -> torch.Tensor:
+    global LAST_LABEL_BACKEND
     structure = np.ones((3, 3, 3), dtype=int) if mask_tensor.ndim == 3 else np.ones((3, 3), dtype=int)
     
     if mask_tensor.device.type == "cuda":
@@ -26,6 +36,7 @@ def _label_connected_components(mask_tensor: torch.Tensor) -> torch.Tensor:
                 
             cp_structure = cp.asarray(structure, dtype=cp.int32)
             labeled, _ = cupy_label(mask_cp, structure=cp_structure)
+            LAST_LABEL_BACKEND = "cupy"
             
             if hasattr(torch, "from_dlpack"):
                 return torch.from_dlpack(labeled).to(mask_tensor.device)
@@ -39,7 +50,74 @@ def _label_connected_components(mask_tensor: torch.Tensor) -> torch.Tensor:
     import scipy.ndimage
     mask_np = mask_tensor.cpu().numpy()
     labeled, _ = scipy.ndimage.label(mask_np, structure=structure)
+    LAST_LABEL_BACKEND = "scipy"
     return torch.from_numpy(labeled.astype(np.int32)).to(mask_tensor.device)
+
+_warned_fallback = False
+
+
+def _cupy_available() -> bool:
+    try:
+        import cupy  # noqa: F401  # type: ignore
+        from cupyx.scipy.ndimage import label  # noqa: F401  # type: ignore
+        return True
+    except Exception:
+        return False
+
+
+def _label_zones(mapped_int: torch.Tensor, n_levels: int, use_slabs: bool | None = None) -> torch.Tensor:
+    """Zone labels (unique ids > 0, 0 outside the ROI) for an image of grey levels 1..n_levels.
+
+    GPU with CuPy: many levels per labelling call, stacked as slabs separated
+    by an empty plane (few large kernel launches). CPU (SciPy): one call per
+    level on that level's own bounding box, which is much cheaper on a CPU.
+    """
+    global _warned_fallback, LAST_LABEL_BACKEND
+    device = mapped_int.device
+    labels = torch.zeros(mapped_int.shape, dtype=torch.int64, device=device)
+    if use_slabs is None:
+        use_slabs = device.type == "cuda" and _cupy_available()
+    if use_slabs:
+        per_level = max(1, mapped_int.numel())
+        batch = max(1, min(n_levels, _LABEL_BATCH_VOXELS // per_level))
+        pad_spec = (0, 0) * (mapped_int.ndim - 1) + (0, 1)
+        current = 0
+        for start in range(1, n_levels + 1, batch):
+            lv = torch.arange(start, min(start + batch, n_levels + 1), device=device)
+            slabs = mapped_int.unsqueeze(0) == lv.view((-1,) + (1,) * mapped_int.ndim)
+            stacked = torch.nn.functional.pad(slabs.to(torch.int32), pad_spec)
+            k, d1 = stacked.shape[0], stacked.shape[1]
+            lab = _label_connected_components(stacked.reshape((k * d1,) + tuple(stacked.shape[2:])))
+            lab = lab.to(torch.int64).reshape(stacked.shape)[:, :-1]
+            lab = torch.where(lab > 0, lab + current, lab)
+            labels += (lab * slabs).sum(dim=0)
+            current = int(lab.max())
+        return labels
+
+    if device.type == "cuda" and not _warned_fallback:
+        logger.warning(
+            "CuPy is not available: GLSZM zone labelling runs on the CPU (SciPy) "
+            "during GPU extraction, which is much slower. Install fastrad[cuda] "
+            "with the CuPy build matching your CUDA version."
+        )
+        _warned_fallback = True
+
+    import scipy.ndimage
+    img_np = mapped_int.cpu().numpy()
+    structure = np.ones((3,) * img_np.ndim, dtype=int)
+    out = np.zeros(img_np.shape, dtype=np.int64)
+    current = 0
+    for g_idx, sl in enumerate(scipy.ndimage.find_objects(img_np)):
+        if sl is None:
+            continue
+        lab, n = scipy.ndimage.label(img_np[sl] == g_idx + 1, structure=structure)
+        if n:
+            region = out[sl]
+            region[lab > 0] = lab[lab > 0] + current
+            current += n
+    LAST_LABEL_BACKEND = "scipy"
+    return torch.from_numpy(out).to(device)
+
 
 def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings) -> dict[str, float]:
     device = image_tensor.device
@@ -72,38 +150,13 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
     if int(torch.max(img_int)) == 0:
         return {}
         
-    import scipy.ndimage
-    
     zero_tensor = torch.tensor([0], dtype=img_int.dtype, device=device)
     _, inverse_indices = torch.unique(torch.cat((zero_tensor, img_int.view(-1))), return_inverse=True)
-    mapped_int = inverse_indices[1:].view(img_int.shape)
-        
-    img_np = mapped_int.cpu().numpy()
-    
-    current_max_label = 0
-    labels_tensor = torch.zeros(img_int.shape, dtype=torch.int64, device=device)
-    
-    # Rapid bounding box identification of all distinct gray levels
-    slices = scipy.ndimage.find_objects(img_np)
-    
-    for g_idx, g_slices in enumerate(slices):
-        if g_slices is None:
-            continue
-            
-        g = g_idx + 1 # unique contiguous bins are 1-indexed
-        crop_img = mapped_int[g_slices]
-        mask_tensor = (crop_img == g).to(torch.int32)
-        
-        # Remove debug loop and restore plain tensor dispatch    
-        labeled_mask = _label_connected_components(mask_tensor)
-        max_label = int(labeled_mask.max())
-            
-        if max_label > 0:
-            mask_pos = labeled_mask > 0
-            labeled_mask[mask_pos] += current_max_label
-            labels_tensor[g_slices] += labeled_mask
-            current_max_label += max_label
-            
+    mapped_int = inverse_indices[1:].view(img_int.shape)       # 0 outside ROI, 1..Ng inside
+    n_levels = int(mapped_int.max())
+
+    labels_tensor = _label_zones(mapped_int, n_levels)
+
     labels = labels_tensor            
     valid_labels = labels[M]
     valid_gray = img_int[M]

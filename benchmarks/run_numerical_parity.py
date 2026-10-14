@@ -89,7 +89,7 @@ def run():
             key = f"{c_name}_{f_name}"
             if hasattr(v, "item"):
                 v = v.item()
-            pyrad_features[key] = float(v)
+            pyrad_features[key] = float(getattr(v, "real", v))
             
     # Compute differences and per-feature entries
     diff_stats = {}

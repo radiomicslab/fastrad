@@ -90,7 +90,7 @@ def validate_case(case_id: str, img_path: Path, mask_path: Path, config_path: Pa
             c_name = parts[1].lower()
             f_name = "_".join(parts[2:]).lower().replace("_", "")
             key = f"{c_name}_{f_name}"
-            pyrad_features[key] = float(v.item() if hasattr(v, "item") else v)
+            pyrad_features[key] = float(getattr(v.item() if hasattr(v, "item") else v, "real", v.item() if hasattr(v, "item") else v))
 
     abs_diffs = []
     n_within = 0
