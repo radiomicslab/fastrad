@@ -12,7 +12,7 @@ abstract: "fastrad is a high-performance Python library for calculating PyRadiom
 version: 1.1.0
 date-released: "2026-04-07"
 license: "Apache-2.0"
-url: "https://github.com/helloerikaaa/fastrad"
+url: "https://github.com/radiomicslab/fastrad"
 preferred-citation:
   type: article
   status: preprint
