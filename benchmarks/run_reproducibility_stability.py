@@ -371,9 +371,32 @@ def run():
         md.append(f"- **PyRadiomics Mean $\\text{{ICC}}(2,1)$ [95% CI]**: **{p_mean:.4f}** [{p_ci[0]:.4f}, {p_ci[1]:.4f}]\n")
         md.append(f"- **Paired $\\Delta\\text{{ICC}}$ (fastrad - PyRadiomics) [95% CI]**: **{f_mean - p_mean:+.4f}** [{diff_ci[0]:.4f}, {diff_ci[1]:.4f}]\n")
         
-        from scipy.stats import wilcoxon
-        stat, p_val = wilcoxon(f_iccs, p_iccs)
-        md.append(f"- **Paired Wilcoxon Signed-Rank Test**: stat={stat:.4f}, $p={p_val:.4f}$ (no statistically detectable difference between pipelines)\n\n")
+        # Per-feature agreement. When both pipelines compute the same values to
+        # floating-point precision, the paired ICC differences are rounding
+        # noise (~1e-8), and a signed-rank test on them only tests the sign of
+        # that noise: its p-value is not meaningful. Report the size of the
+        # differences and an equivalence test against a practical margin.
+        import numpy as _np
+        from scipy.stats import ttest_1samp, wilcoxon
+        diffs = _np.asarray(f_iccs, dtype=float) - _np.asarray(p_iccs, dtype=float)
+        max_abs = float(_np.max(_np.abs(diffs)))
+        n_identical_7dp = int(_np.sum(_np.round(diffs, 7) == 0))
+        margin = 0.01
+        if _np.allclose(diffs, 0.0):
+            tost_p = 0.0
+        else:
+            p_lo = ttest_1samp(diffs, -margin, alternative="greater").pvalue
+            p_hi = ttest_1samp(diffs, margin, alternative="less").pvalue
+            tost_p = float(max(p_lo, p_hi))
+        md.append(f"- **Max per-feature |ICC difference|**: {max_abs:.2e} "
+                  f"({n_identical_7dp}/{len(diffs)} features identical to 7 decimal places)\n")
+        md.append(f"- **Equivalence (TOST, margin ±{margin})**: p = {tost_p:.2e}\n")
+        try:
+            stat, p_val = wilcoxon(f_iccs, p_iccs)
+            md.append(f"- *Wilcoxon signed-rank on the same differences (not meaningful at floating-point "
+                      f"scale, reported for completeness)*: stat={stat:.1f}, p={p_val:.4f}\n\n")
+        except ValueError:
+            md.append("- *Wilcoxon signed-rank not computable: all differences are zero*\n\n")
 
     # 5.2 Perturbation Stability Analysis
     print("  -> Profiling Perturbation Stability Matrices (5.2)...")
@@ -402,7 +425,7 @@ def run():
             if k.startswith("original_"):
                 key = pyrad_to_fastrad(k)
                 if key:
-                    pyrad_base[key] = float(v) if not hasattr(v, "item") else float(v.item())
+                    pyrad_base[key] = float(getattr(v, "real", v)) if not hasattr(v, "item") else float(getattr(v.item(), "real", v.item()))
 
         perturbations = apply_perturbations(img_t)
         
@@ -419,7 +442,7 @@ def run():
                 if k.startswith("original_"):
                     key = pyrad_to_fastrad(k)
                     if key:
-                        p_res_p[key] = float(v) if not hasattr(v, "item") else float(v.item())
+                        p_res_p[key] = float(getattr(v, "real", v)) if not hasattr(v, "item") else float(getattr(v.item(), "real", v.item()))
                             
             f_drifts, p_drifts = [], []
             shared_p_keys = [k for k in fastrad_base if k in pyrad_base and k in f_res_p and k in p_res_p]

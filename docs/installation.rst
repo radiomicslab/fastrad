@@ -15,7 +15,7 @@ Currently, `fastrad` is actively developed on GitHub. To install the latest stab
 .. code-block:: bash
 
    # Clone the repository
-   git clone https://github.com/helloerikaaa/fastrad.git
+   git clone https://github.com/radiomicslab/fastrad.git
    cd fastrad
 
    # Install standard CPU dependencies

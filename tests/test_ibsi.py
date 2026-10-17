@@ -14,8 +14,8 @@ from fastrad.image import Mask, MedicalImage
 from fastrad.settings import FeatureSettings
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ibsi"
-URL_IMAGE = "https://github.com/theibsi/data_sets/raw/main/ibsi_1_digital_phantom/nifti/image/phantom.nii.gz"
-URL_MASK = "https://github.com/theibsi/data_sets/raw/main/ibsi_1_digital_phantom/nifti/mask/mask.nii.gz"
+URL_IMAGE = "https://github.com/theibsi/data_sets/raw/master/ibsi_1_digital_phantom/nifti/image/phantom.nii.gz"
+URL_MASK = "https://github.com/theibsi/data_sets/raw/master/ibsi_1_digital_phantom/nifti/mask/mask.nii.gz"
 URL_REF = "https://raw.githubusercontent.com/theibsi/data_sets/main/ibsi_1_digital_phantom/reference/features/ibsi_1_digital_phantom_reference_features.csv" # Not used anymore
 
 def download_if_needed(url: str, filepath: Path) -> bool:

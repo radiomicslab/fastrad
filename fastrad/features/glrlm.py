@@ -34,90 +34,50 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
     img_int = binned_image.to(torch.int64)
     M = mask_tensor > 0.5
     D, H, W = img_int.shape
-    
-    angle_results = []
-    max_length = 0
-    
-    for a_idx, (dz, dy, dx) in enumerate(angles):
-        z, y, x = torch.nonzero(M, as_tuple=True)
-        
-        zb, yb, xb = z - dz, y - dy, x - dx
-        
-        valid_back = (zb >= 0) & (zb < D) & (yb >= 0) & (yb < H) & (xb >= 0) & (xb < W)
-        
-        is_start = torch.ones_like(z, dtype=torch.bool)
-        
-        z_valid_back = zb[valid_back]
-        y_valid_back = yb[valid_back]
-        x_valid_back = xb[valid_back]
-        
-        match_back = M[z_valid_back, y_valid_back, x_valid_back] & \
-                     (img_int[z_valid_back, y_valid_back, x_valid_back] == img_int[z[valid_back], y[valid_back], x[valid_back]])
-                     
-        is_start[valid_back] = ~match_back
-        
-        start_z = z[is_start]
-        start_y = y[is_start]
-        start_x = x[is_start]
-        
-        lengths = torch.ones_like(start_z)
-        gray_levels = img_int[start_z, start_y, start_x]
-        
-        curr_z, curr_y, curr_x = start_z, start_y, start_x
-        active = torch.ones_like(start_z, dtype=torch.bool)
-        
-        while active.any():
-            curr_z = curr_z + dz
-            curr_y = curr_y + dy
-            curr_x = curr_x + dx
-            
-            in_bounds = (curr_z >= 0) & (curr_z < D) & (curr_y >= 0) & (curr_y < H) & (curr_x >= 0) & (curr_x < W)
-            active = active & in_bounds
-            
-            if not active.any():
-                break
-                
-            curr_z_act = curr_z[active]
-            curr_y_act = curr_y[active]
-            curr_x_act = curr_x[active]
-            
-            match_fwd = M[curr_z_act, curr_y_act, curr_x_act] & \
-                        (img_int[curr_z_act, curr_y_act, curr_x_act] == gray_levels[active])
-                        
-            active_flat = active.clone()
-            active_flat[active] = match_fwd
-            active = active_flat
-            
-            lengths[active] += 1
 
-        if lengths.numel() > 0:
-            m_len = torch.max(lengths)
-            if m_len > max_length:
-                max_length = int(m_len)
-                
-        angle_results.append((gray_levels, lengths))
-        
-    Nr = max_length
+    # Run lengths for all 13 directions in one vectorised pass (no per-step loop).
+    # Every ROI voxel p lies on the line {base + t*d} of direction d, where t is
+    # its coordinate along d's first non-zero axis (that component is +1 for all
+    # 13 directions) and base = p - t*d. Sorting voxels by (direction, line, t)
+    # puts each line's ROI voxels in order; a run starts wherever the line
+    # changes, t is not consecutive (the ROI is interrupted) or the grey level
+    # changes. This is exactly the run definition of the original loop.
+    coords = torch.nonzero(M)                                   # (N, 3)
+    if coords.shape[0] == 0:
+        return {}
+    gl = img_int[M]                                             # (N,) same order
+    d_t = torch.tensor(angles, dtype=torch.int64, device=device)  # (13, 3)
+    N_a = d_t.shape[0]
+    axis = torch.tensor([next(i for i in range(3) if a[i] != 0) for a in angles], device=device)
+    t = coords[:, axis].T                                       # (13, N)
+    base = coords.unsqueeze(0) - t.unsqueeze(-1) * d_t.unsqueeze(1)  # (13, N, 3)
+    S = D + H + W                                               # makes base components >= 0
+    R = 2 * S + 1
+    T = max(D, H, W) + 2
+    line = ((base[..., 0] + S) * R + (base[..., 1] + S)) * R + (base[..., 2] + S)  # (13, N)
+    a_ids = torch.arange(N_a, device=device).view(-1, 1)
+    key = (a_ids * (R ** 3) + line) * T + t                     # unique per (direction, voxel)
+    key = key.reshape(-1)
+    order = torch.argsort(key)
+    key_s = key[order]
+    g_s = gl.repeat(N_a)[order]
+    a_s = a_ids.expand(-1, coords.shape[0]).reshape(-1)[order]
+    same_line_next = (key_s[1:] - key_s[:-1]) == 1              # same direction+line, t consecutive
+    new_run = torch.ones_like(key_s, dtype=torch.bool)
+    new_run[1:] = ~(same_line_next & (g_s[1:] == g_s[:-1]))
+    run_id = torch.cumsum(new_run.to(torch.int64), 0) - 1
+    lengths = torch.bincount(run_id)                            # (n_runs,)
+    run_gray = g_s[new_run]
+    run_angle = a_s[new_run]
+
+    Nr = int(lengths.max())
     if Nr == 0:
         return {}
-        
-    N_a = len(angles)
     max_gl = int(torch.max(ivector))
-    P_glrlm_raw = torch.zeros((max_gl, Nr, N_a), dtype=torch.float64, device=device)
-    
-    for a_idx, (gray_levels, lengths) in enumerate(angle_results):
-        if gray_levels.numel() == 0:
-            continue
-            
-        g = gray_levels - 1
-        l = lengths - 1
-        
-        linear_indices = g * Nr + l
-        counts = torch.bincount(linear_indices, minlength=max_gl*Nr).to(torch.float64)
-        counts = counts[:max_gl*Nr].view(max_gl, Nr)
-        
-        P_glrlm_raw[:, :, a_idx] = counts
-        
+    lin = (run_angle * max_gl + (run_gray - 1)) * Nr + (lengths - 1)
+    counts = torch.bincount(lin, minlength=N_a * max_gl * Nr)[: N_a * max_gl * Nr]
+    P_glrlm_raw = counts.view(N_a, max_gl, Nr).permute(1, 2, 0).to(torch.float64)
+
     valid_idx = (ivector - 1).to(torch.int64)
     P_glrlm = P_glrlm_raw[valid_idx, :, :]
         

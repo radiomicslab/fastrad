@@ -1,0 +1,257 @@
+diff --git a/.gitignore b/.gitignore
+index a119a4e..05f3e91 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -10,3 +10,4 @@ benchmarks/figures/
+ data/
+ tests/fixtures/image/
+ tests/fixtures/mask/
++benchmarks/results/
+diff --git a/benchmarks/generate_figures.py b/benchmarks/generate_figures.py
+index 86eea67..325aed6 100644
+--- a/benchmarks/generate_figures.py
++++ b/benchmarks/generate_figures.py
+@@ -83,21 +83,19 @@ def fig_a1_architecture():
+ 
+ 
+ def fig_a2_gpu_scaling():
+-    """A2: GPU speedup vs. ROI voxel count, from runtime_table.csv."""
++    """A2: end-to-end extraction time vs. ROI voxel count (single full calls), from runtime_table.csv."""
+     df = _require("runtime_table.csv")
+-    if df["fastrad_gpu_median"].isna().all():
+-        print("WARNING: fastrad_gpu_median is all-NaN in runtime_table.csv -- "
+-              "GPU benchmark has not produced real numbers yet. Skipping A2.")
+-        return
+-    df = df.dropna(subset=["fastrad_gpu_median"])
+-    speedup = df["pyradiomics_median"] / df["fastrad_gpu_median"]
+-
+     fig, ax = plt.subplots(figsize=(6, 4.5))
+-    ax.plot(df["voxel_count"], speedup, marker="o")
++    ax.plot(df["voxel_count"], df["pyradiomics_median"], marker="o", label="PyRadiomics (1 thread)")
++    ax.plot(df["voxel_count"], df["fastrad_cpu_median"], marker="s", label="fastrad CPU (1 thread)")
++    if not df["fastrad_gpu_median"].isna().all():
++        ax.plot(df["voxel_count"], df["fastrad_gpu_median"], marker="^", label="fastrad GPU")
+     ax.set_xscale("log")
++    ax.set_yscale("log")
+     ax.set_xlabel("ROI voxel count (log scale)")
+-    ax.set_ylabel("GPU speedup vs. PyRadiomics (x)")
+-    ax.set_title("fastrad GPU speedup vs. ROI size")
++    ax.set_ylabel("Extraction time per scan (s, log scale)")
++    ax.set_title("Single-scan extraction time vs. ROI size")
++    ax.legend()
+     ax.grid(True, which="both", alpha=0.3)
+     fig.tight_layout()
+     fig.savefig(FIGURES_DIR / "A2_gpu_scaling.png", dpi=200)
+@@ -176,6 +174,32 @@ def fig_a5_memory_scaling():
+     plt.close(fig)
+ 
+ 
++def fig_a6_cohort_throughput():
++    """A6: cohort throughput vs. concurrent GPU workers, with CPU baselines, from cohort_throughput.csv."""
++    df = _require("cohort_throughput.csv")
++    gpu = df[df["config"] == "fastrad_gpu"].sort_values("workers")
++    pyr = df[df["config"] == "pyradiomics"]
++    cpu = df[df["config"] == "fastrad_cpu"]
++    fig, ax = plt.subplots(figsize=(6, 4.5))
++    ax.plot(gpu["workers"], gpu["median_scans_per_min"], marker="o", label="fastrad, 1 GPU, K concurrent workers")
++    for _, r in pyr.iterrows():
++        ax.axhline(r["median_scans_per_min"], color="C1", linestyle="--",
++                   label=f"PyRadiomics, {int(r['workers'])} CPU processes")
++    for i, (_, r) in enumerate(cpu.iterrows()):
++        ax.axhline(r["median_scans_per_min"], color="C2", linestyle=[":", "-."][i % 2],
++                   label=f"fastrad CPU, {int(r['workers'])} processes")
++    ax.set_xlabel("Concurrent GPU workers K")
++    ax.set_ylabel("Cohort throughput (scans/min)")
++    ax.set_title("Cohort throughput")
++    ax.set_ylim(bottom=0)
++    ax.set_xticks(gpu["workers"].tolist())
++    ax.legend(fontsize=8)
++    ax.grid(True, alpha=0.3)
++    fig.tight_layout()
++    fig.savefig(FIGURES_DIR / "A6_cohort_throughput.png", dpi=200)
++    plt.close(fig)
++
++
+ def run():
+     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+     print("Generating A1 (architecture schematic)...")
+@@ -188,6 +212,11 @@ def run():
+     fig_a4_parity_scatter()
+     print("Generating A5 (memory scaling)...")
+     fig_a5_memory_scaling()
++    print("Generating A6 (cohort throughput)...")
++    if (OUTPUT_DIR / "cohort_throughput.csv").exists():
++        fig_a6_cohort_throughput()
++    else:
++        print("  cohort_throughput.csv not found; skipping A6.")
+     print(f"Done. Check {FIGURES_DIR} and inspect every figure before use.")
+ 
+ 
+diff --git a/benchmarks/run_memory_efficiency.py b/benchmarks/run_memory_efficiency.py
+index 4ebfdd0..06e17d9 100644
+--- a/benchmarks/run_memory_efficiency.py
++++ b/benchmarks/run_memory_efficiency.py
+@@ -207,36 +207,42 @@ def run():
+     print("  -> Profiling GPU VRAM per feature class (4.2)...")
+     md.append("### 4.2 GPU VRAM Profile\n")
+     if torch.cuda.is_available():
+-        mask_t = create_spherical_mask(img_t.shape, 15.0, spacing)
+-        f_mask = Mask(mask_t, spacing=spacing)
+-        
+-        fastrad_img = MedicalImage(img_t, spacing=spacing)
+-        fastrad_img = fastrad_img.to("cuda")
+-        f_mask = f_mask.to("cuda")
+-        
+-        md.append("| Feature Class | Peak VRAM Allocated (MB) |")
+-        md.append("|---|---|")
+-        
++        # Inputs stay on the CPU, as in normal use: the extractor crops on the
++        # host and moves only the ROI region to the GPU. Reported: peak memory
++        # allocated by PyTorch during extract(), plus the driver-level used
++        # memory (includes the CUDA context and the CuPy pool).
+         config_path = project_root / "pyradiomics_config.yaml"
+-        base_settings = FeatureSettings.from_yaml(config_path, device="cuda")
+-        classes = base_settings.feature_classes
++        classes = FeatureSettings.from_yaml(config_path, device="cuda").feature_classes
++        mask_path = project_root / "tests" / "fixtures" / "tcia" / "lung1_label.nrrd"
++        inputs = [("Synthetic 15 mm sphere", create_spherical_mask(img_t.shape, 15.0, spacing))]
++        if mask_path.exists():
++            inputs.append(("Clinical LUNG1-001 GTV-1",
++                           torch.from_numpy(sitk.GetArrayFromImage(sitk.ReadImage(str(mask_path)))).float()))
++        fastrad_img = MedicalImage(img_t, spacing=spacing)
+ 
+-        def profile_vram(classes_to_run):
+-            torch.cuda.reset_peak_memory_stats()
+-            torch.cuda.empty_cache()
+-            
++        def profile_vram(f_mask, classes_to_run):
+             f_ext = FeatureExtractor(FeatureSettings.from_yaml(config_path, feature_classes=classes_to_run, device="cuda"))
++            f_ext.extract(fastrad_img, f_mask)  # warm-up (CUDA context, kernels, CuPy)
++            torch.cuda.synchronize()
++            torch.cuda.empty_cache()
++            base = torch.cuda.memory_allocated()
++            torch.cuda.reset_peak_memory_stats()
+             f_ext.extract(fastrad_img, f_mask)
+             torch.cuda.synchronize()
+-            
+-            peak_bytes = torch.cuda.max_memory_allocated()
+-            return peak_bytes / (1024**2)
+-        for cls in classes:
+-            vram = profile_vram([cls])
+-            md.append(f"| {cls} | {vram:.2f} |")
+-            
+-        total_vram = profile_vram(classes)
+-        md.append(f"| **FULL PIPELINE** | **{total_vram:.2f}** |")
++            peak = (torch.cuda.max_memory_allocated() - base) / 1024 ** 2
++            free, total = torch.cuda.mem_get_info()
++            return peak, (total - free) / 1024 ** 2
++
++        md.append("| Input | Feature Class | Peak VRAM allocated by extract() (MB) | Device memory in use (MB) |")
++        md.append("|---|---|---|---|")
++        for name, m in inputs:
++            f_mask = Mask(m, spacing=spacing)
++            n_vox = int((m > 0).sum())
++            for cls in classes:
++                peak, used = profile_vram(f_mask, [cls])
++                md.append(f"| {name} ({n_vox} vox) | {cls} | {peak:.2f} | {used:.0f} |")
++            peak, used = profile_vram(f_mask, classes)
++            md.append(f"| {name} ({n_vox} vox) | **FULL PIPELINE** | **{peak:.2f}** | {used:.0f} |")
+     else:
+         md.append("*GPU VRAM profiling skipped (CUDA not available).*")
+         
+diff --git a/benchmarks/run_multicase_validation.py b/benchmarks/run_multicase_validation.py
+index fff6ab0..6e2788c 100644
+--- a/benchmarks/run_multicase_validation.py
++++ b/benchmarks/run_multicase_validation.py
+@@ -90,7 +90,7 @@ def validate_case(case_id: str, img_path: Path, mask_path: Path, config_path: Pa
+             c_name = parts[1].lower()
+             f_name = "_".join(parts[2:]).lower().replace("_", "")
+             key = f"{c_name}_{f_name}"
+-            pyrad_features[key] = float(v.item() if hasattr(v, "item") else v)
++            pyrad_features[key] = float(getattr(v.item() if hasattr(v, "item") else v, "real", v.item() if hasattr(v, "item") else v))
+ 
+     abs_diffs = []
+     n_within = 0
+diff --git a/benchmarks/run_numerical_parity.py b/benchmarks/run_numerical_parity.py
+index 287c200..e9c4bd9 100644
+--- a/benchmarks/run_numerical_parity.py
++++ b/benchmarks/run_numerical_parity.py
+@@ -89,7 +89,7 @@ def run():
+             key = f"{c_name}_{f_name}"
+             if hasattr(v, "item"):
+                 v = v.item()
+-            pyrad_features[key] = float(v)
++            pyrad_features[key] = float(getattr(v, "real", v))
+             
+     # Compute differences and per-feature entries
+     diff_stats = {}
+diff --git a/benchmarks/run_reproducibility_stability.py b/benchmarks/run_reproducibility_stability.py
+index 225c281..18da996 100644
+--- a/benchmarks/run_reproducibility_stability.py
++++ b/benchmarks/run_reproducibility_stability.py
+@@ -371,9 +371,32 @@ def run():
+         md.append(f"- **PyRadiomics Mean $\\text{{ICC}}(2,1)$ [95% CI]**: **{p_mean:.4f}** [{p_ci[0]:.4f}, {p_ci[1]:.4f}]\n")
+         md.append(f"- **Paired $\\Delta\\text{{ICC}}$ (fastrad - PyRadiomics) [95% CI]**: **{f_mean - p_mean:+.4f}** [{diff_ci[0]:.4f}, {diff_ci[1]:.4f}]\n")
+         
+-        from scipy.stats import wilcoxon
+-        stat, p_val = wilcoxon(f_iccs, p_iccs)
+-        md.append(f"- **Paired Wilcoxon Signed-Rank Test**: stat={stat:.4f}, $p={p_val:.4f}$ (no statistically detectable difference between pipelines)\n\n")
++        # Per-feature agreement. When both pipelines compute the same values to
++        # floating-point precision, the paired ICC differences are rounding
++        # noise (~1e-8), and a signed-rank test on them only tests the sign of
++        # that noise: its p-value is not meaningful. Report the size of the
++        # differences and an equivalence test against a practical margin.
++        import numpy as _np
++        from scipy.stats import ttest_1samp, wilcoxon
++        diffs = _np.asarray(f_iccs, dtype=float) - _np.asarray(p_iccs, dtype=float)
++        max_abs = float(_np.max(_np.abs(diffs)))
++        n_identical_7dp = int(_np.sum(_np.round(diffs, 7) == 0))
++        margin = 0.01
++        if _np.allclose(diffs, 0.0):
++            tost_p = 0.0
++        else:
++            p_lo = ttest_1samp(diffs, -margin, alternative="greater").pvalue
++            p_hi = ttest_1samp(diffs, margin, alternative="less").pvalue
++            tost_p = float(max(p_lo, p_hi))
++        md.append(f"- **Max per-feature |ICC difference|**: {max_abs:.2e} "
++                  f"({n_identical_7dp}/{len(diffs)} features identical to 7 decimal places)\n")
++        md.append(f"- **Equivalence (TOST, margin ±{margin})**: p = {tost_p:.2e}\n")
++        try:
++            stat, p_val = wilcoxon(f_iccs, p_iccs)
++            md.append(f"- *Wilcoxon signed-rank on the same differences (not meaningful at floating-point "
++                      f"scale, reported for completeness)*: stat={stat:.1f}, p={p_val:.4f}\n\n")
++        except ValueError:
++            md.append("- *Wilcoxon signed-rank not computable: all differences are zero*\n\n")
+ 
+     # 5.2 Perturbation Stability Analysis
+     print("  -> Profiling Perturbation Stability Matrices (5.2)...")
+@@ -402,7 +425,7 @@ def run():
+             if k.startswith("original_"):
+                 key = pyrad_to_fastrad(k)
+                 if key:
+-                    pyrad_base[key] = float(v) if not hasattr(v, "item") else float(v.item())
++                    pyrad_base[key] = float(getattr(v, "real", v)) if not hasattr(v, "item") else float(getattr(v.item(), "real", v.item()))
+ 
+         perturbations = apply_perturbations(img_t)
+         
+@@ -419,7 +442,7 @@ def run():
+                 if k.startswith("original_"):
+                     key = pyrad_to_fastrad(k)
+                     if key:
+-                        p_res_p[key] = float(v) if not hasattr(v, "item") else float(v.item())
++                        p_res_p[key] = float(getattr(v, "real", v)) if not hasattr(v, "item") else float(getattr(v.item(), "real", v.item()))
+                             
+             f_drifts, p_drifts = [], []
+             shared_p_keys = [k for k in fastrad_base if k in pyrad_base and k in f_res_p and k in p_res_p]
+diff --git a/benchmarks/run_single_call_latency.py b/benchmarks/run_single_call_latency.py
+index 552a2e4..b2ab62e 100644
+--- a/benchmarks/run_single_call_latency.py
++++ b/benchmarks/run_single_call_latency.py
+@@ -62,6 +62,7 @@ def n_features(d):
+ from radiomics import featureextractor, setVerbosity
+ setVerbosity(40)
+ import SimpleITK as sitk
++sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(1)  # SimpleITK has its own thread pool
+ pr = featureextractor.RadiomicsFeatureExtractor(a.config)
+ pr_img, pr_msk = sitk.ReadImage(a.image), sitk.ReadImage(a.mask)  # load once, like fastrad
+ pr_med, pr_iqr, pr_out = bench(lambda: pr.execute(pr_img, pr_msk))

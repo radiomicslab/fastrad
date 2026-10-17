@@ -207,36 +207,42 @@ def run():
     print("  -> Profiling GPU VRAM per feature class (4.2)...")
     md.append("### 4.2 GPU VRAM Profile\n")
     if torch.cuda.is_available():
-        mask_t = create_spherical_mask(img_t.shape, 15.0, spacing)
-        f_mask = Mask(mask_t, spacing=spacing)
-        
-        fastrad_img = MedicalImage(img_t, spacing=spacing)
-        fastrad_img = fastrad_img.to("cuda")
-        f_mask = f_mask.to("cuda")
-        
-        md.append("| Feature Class | Peak VRAM Allocated (MB) |")
-        md.append("|---|---|")
-        
+        # Inputs stay on the CPU, as in normal use: the extractor crops on the
+        # host and moves only the ROI region to the GPU. Reported: peak memory
+        # allocated by PyTorch during extract(), plus the driver-level used
+        # memory (includes the CUDA context and the CuPy pool).
         config_path = project_root / "pyradiomics_config.yaml"
-        base_settings = FeatureSettings.from_yaml(config_path, device="cuda")
-        classes = base_settings.feature_classes
+        classes = FeatureSettings.from_yaml(config_path, device="cuda").feature_classes
+        mask_path = project_root / "tests" / "fixtures" / "tcia" / "lung1_label.nrrd"
+        inputs = [("Synthetic 15 mm sphere", create_spherical_mask(img_t.shape, 15.0, spacing))]
+        if mask_path.exists():
+            inputs.append(("Clinical LUNG1-001 GTV-1",
+                           torch.from_numpy(sitk.GetArrayFromImage(sitk.ReadImage(str(mask_path)))).float()))
+        fastrad_img = MedicalImage(img_t, spacing=spacing)
 
-        def profile_vram(classes_to_run):
-            torch.cuda.reset_peak_memory_stats()
-            torch.cuda.empty_cache()
-            
+        def profile_vram(f_mask, classes_to_run):
             f_ext = FeatureExtractor(FeatureSettings.from_yaml(config_path, feature_classes=classes_to_run, device="cuda"))
+            f_ext.extract(fastrad_img, f_mask)  # warm-up (CUDA context, kernels, CuPy)
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            base = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
             f_ext.extract(fastrad_img, f_mask)
             torch.cuda.synchronize()
-            
-            peak_bytes = torch.cuda.max_memory_allocated()
-            return peak_bytes / (1024**2)
-        for cls in classes:
-            vram = profile_vram([cls])
-            md.append(f"| {cls} | {vram:.2f} |")
-            
-        total_vram = profile_vram(classes)
-        md.append(f"| **FULL PIPELINE** | **{total_vram:.2f}** |")
+            peak = (torch.cuda.max_memory_allocated() - base) / 1024 ** 2
+            free, total = torch.cuda.mem_get_info()
+            return peak, (total - free) / 1024 ** 2
+
+        md.append("| Input | Feature Class | Peak VRAM allocated by extract() (MB) | Device memory in use (MB) |")
+        md.append("|---|---|---|---|")
+        for name, m in inputs:
+            f_mask = Mask(m, spacing=spacing)
+            n_vox = int((m > 0).sum())
+            for cls in classes:
+                peak, used = profile_vram(f_mask, [cls])
+                md.append(f"| {name} ({n_vox} vox) | {cls} | {peak:.2f} | {used:.0f} |")
+            peak, used = profile_vram(f_mask, classes)
+            md.append(f"| {name} ({n_vox} vox) | **FULL PIPELINE** | **{peak:.2f}** | {used:.0f} |")
     else:
         md.append("*GPU VRAM profiling skipped (CUDA not available).*")
         

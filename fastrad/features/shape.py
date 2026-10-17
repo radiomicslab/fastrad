@@ -7,15 +7,27 @@ from fastrad.settings import FeatureSettings
 
 
 def compute(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings) -> dict[str, float]:
-    device = settings.device
+    device = mask_tensor.device  # already on the extractor's resolved device
     spacing = settings.spacing
     
     # Move mask to device
     mask_tensor = mask_tensor.to(device)
-    
-    # 1. Mesh Features
+
+    # 1. Mesh Features, in PyRadiomics' coordinate frame: the mask cropped to
+    # its exact bounding box and padded by one voxel. The marching-cubes mesh
+    # is not perfectly closed (in PyRadiomics either: same tables), and the
+    # signed-tetrahedron volume of an open mesh depends on the coordinate
+    # origin, so MeshVolume (and everything derived from it) only matches
+    # PyRadiomics when computed in the same frame.
+    nz = torch.nonzero(mask_tensor > 0.5)
+    if nz.numel() == 0:
+        return {}
+    lo, hi = nz.min(dim=0).values.tolist(), (nz.max(dim=0).values + 1).tolist()
+    mesh_mask = torch.nn.functional.pad(
+        (mask_tensor[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] > 0.5).to(torch.float32), (1, 1, 1, 1, 1, 1)
+    )
     # Note: spacing is provided in native order, assuming shape_utils expects (Z, Y, X)
-    mesh_res = calculate_mesh_features(mask_tensor, spacing)
+    mesh_res = calculate_mesh_features(mesh_mask, spacing)
     
     surface_area = mesh_res["SurfaceArea"]
     mesh_volume = mesh_res["MeshVolume"]
