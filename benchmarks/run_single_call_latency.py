@@ -6,8 +6,15 @@ This is the like-for-like end-to-end comparison (no per-class summing).
 usage (from repo root):
   uv run python benchmarks/run_single_call_latency.py IMAGE.nrrd MASK.nrrd [pyradiomics_config.yaml] [--reps 20]
 """
+
 import os
-for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+
+for _v in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
     os.environ[_v] = "1"  # must be set before numpy/torch/radiomics import
 
 import argparse
@@ -30,6 +37,7 @@ a = ap.parse_args()
 
 try:
     from loguru import logger
+
     logger.remove()
 except Exception:
     pass
@@ -60,33 +68,52 @@ def n_features(d):
 
 # --- PyRadiomics: one execute() with every class enabled in the config ---
 from radiomics import featureextractor, setVerbosity
+
 setVerbosity(40)
 import SimpleITK as sitk
-sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(1)  # SimpleITK has its own thread pool
+
+sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(
+    1
+)  # SimpleITK has its own thread pool
 pr = featureextractor.RadiomicsFeatureExtractor(a.config)
-pr_img, pr_msk = sitk.ReadImage(a.image), sitk.ReadImage(a.mask)  # load once, like fastrad
+pr_img, pr_msk = (
+    sitk.ReadImage(a.image),
+    sitk.ReadImage(a.mask),
+)  # load once, like fastrad
 pr_med, pr_iqr, pr_out = bench(lambda: pr.execute(pr_img, pr_msk))
 
 # --- fastrad (same loader/settings as the cohort benchmark) ---
 import torch
+
 torch.set_num_threads(1)
 from run_cohort_throughput import load_fastrad_case, make_fastrad_extractor
+
 img, msk = load_fastrad_case(a.image, a.mask)
 
 ex_cpu = make_fastrad_extractor("cpu", a.config)
 cpu_med, cpu_iqr, cpu_out = bench(lambda: ex_cpu.extract(img, msk))
 
-rows = [("PyRadiomics, 1 thread", pr_med, pr_iqr, n_features(pr_out)),
-        ("fastrad CPU, 1 thread", cpu_med, cpu_iqr, n_features(cpu_out))]
+rows = [
+    ("PyRadiomics, 1 thread", pr_med, pr_iqr, n_features(pr_out)),
+    ("fastrad CPU, 1 thread", cpu_med, cpu_iqr, n_features(cpu_out)),
+]
 
 if torch.cuda.is_available():
     ex_gpu = make_fastrad_extractor("cuda", a.config)
-    gpu_med, gpu_iqr, gpu_out = bench(lambda: ex_gpu.extract(img, msk), sync=torch.cuda.synchronize)
+    gpu_med, gpu_iqr, gpu_out = bench(
+        lambda: ex_gpu.extract(img, msk), sync=torch.cuda.synchronize
+    )
     rows.append(("fastrad GPU", gpu_med, gpu_iqr, n_features(gpu_out)))
 
-print(f"\nFull single-call extraction, {a.reps} reps after {a.warmup} warm-up "
-      f"(image/mask loaded once for both tools; file I/O excluded)")
-print(f"{'config':24s} {'median s':>10s} {'IQR s':>8s} {'features':>9s} {'speedup vs PyRad':>17s}")
+print(
+    f"\nFull single-call extraction, {a.reps} reps after {a.warmup} warm-up "
+    f"(image/mask loaded once for both tools; file I/O excluded)"
+)
+print(
+    f"{'config':24s} {'median s':>10s} {'IQR s':>8s} {'features':>9s} {'speedup vs PyRad':>17s}"
+)
 for name, med, iqr, n in rows:
     print(f"{name:24s} {med:10.4f} {iqr:8.4f} {n:9d} {pr_med / med:16.2f}x")
-print("\nCheck: the 'features' column should be the same 107 (+ fastrad's extra standard_deviation) for all rows.")
+print(
+    "\nCheck: the 'features' column should be the same 107 (+ fastrad's extra standard_deviation) for all rows."
+)

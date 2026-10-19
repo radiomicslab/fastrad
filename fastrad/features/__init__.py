@@ -15,5 +15,5 @@ __all__ = [
     "compute_glszm",
     "compute_ngtdm",
     "compute_shape",
-    "compute_shape2d"
+    "compute_shape2d",
 ]

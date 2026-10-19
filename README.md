@@ -56,24 +56,26 @@ import fastrad
 img, mask = fastrad.load_and_align(
     image_path="/path/to/image.nii.gz",
     mask_path="/path/to/mask.nrrd",
-    resample_spacing=(1.0, 1.0, 1.0), # Optional: force isotropic resampling natively!
-    crop=True
+    resample_spacing=(1.0, 1.0, 1.0),  # Optional: force isotropic resampling natively!
+    crop=True,
 )
 
 # 2. [Optional] Apply built-in Mathematical Image Filters natively on PyTorch GPU
 filter_params = {
     "Original": {},
-    "LoG": {"sigma": [1.0, 3.0]}, # Laplacian of Gaussian strictly matched to PyRadiomics!
+    "LoG": {
+        "sigma": [1.0, 3.0]
+    },  # Laplacian of Gaussian strictly matched to PyRadiomics!
     "Square": {},
-    "Logarithm": {}
+    "Logarithm": {},
 }
 filtered_images_dict = fastrad.apply_builtin_filters(img, filter_params)
 
-# 3. Configure extractor settings 
+# 3. Configure extractor settings
 settings = FeatureSettings(
-    feature_classes=["firstorder", "shape", "glcm"], # specify needed features
+    feature_classes=["firstorder", "shape", "glcm"],  # specify needed features
     bin_width=25.0,
-    device="auto" # use "cuda", "cpu", or "auto"
+    device="auto",  # use "cuda", "cpu", or "auto"
 )
 
 # 4. Extract Features across generated filters
@@ -94,7 +96,7 @@ Offloading to GPU using `fastrad` dramatically reduces Feature Extraction runtim
 settings_gpu = FeatureSettings(
     feature_classes=["firstorder", "shape", "glcm", "glrlm", "glszm", "gldm", "ngtdm"],
     bin_width=25.0,
-    device="cuda"
+    device="cuda",
 )
 
 extractor = FeatureExtractor(settings_gpu)
@@ -110,7 +112,7 @@ settings_compiled = FeatureSettings(
     bin_width=25.0,
     device="cuda",
     compile=True,
-    compile_mode="reduce-overhead" # PyTorch default compilation flag
+    compile_mode="reduce-overhead",  # PyTorch default compilation flag
 )
 ```
 *(Note: JIT acceleration inherently contains a cold-start compilation overhead on the first executed image, so it is best utilized when processing patient cohorts rather than single-image evaluation. Additionally, Mac Apple Silicon MPS compatibility is currently limited in PyTorch, so fallback behavior may occur).*

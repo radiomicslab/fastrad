@@ -22,6 +22,7 @@ Each <case_id> directory should contain one clinical CT image and its
 corresponding binary segmentation mask, in NRRD format, matching the
 convention already used for LUNG1-001 in run_numerical_parity.py.
 """
+
 import csv
 from pathlib import Path
 
@@ -30,15 +31,14 @@ import SimpleITK as sitk
 import torch
 from radiomics import featureextractor
 
-from fastrad import FeatureExtractor, FeatureSettings, Mask, MedicalImage
-
 # Re-use the same key-mapping logic as run_numerical_parity.py so the two
 # scripts cannot silently drift apart. If you edit the mapping in one
 # place, edit it in both, or better, factor this out into a shared module
 # (see review checklist -- this duplication already exists between
 # run_numerical_parity.py and run_reproducibility_stability.py).
-from run_numerical_parity import map_fastrad_to_pyrad_key  # noqa: E402
+from run_numerical_parity import map_fastrad_to_pyrad_key
 
+from fastrad import FeatureExtractor, FeatureSettings, Mask, MedicalImage
 
 # List of case IDs to validate, each expected to have its own
 # image.nrrd / label.nrrd under tests/fixtures/tcia/multicase/<case_id>/.
@@ -59,7 +59,9 @@ CASES: list[str] = [
 ]
 
 
-def validate_case(case_id: str, img_path: Path, mask_path: Path, config_path: Path) -> dict:
+def validate_case(
+    case_id: str, img_path: Path, mask_path: Path, config_path: Path
+) -> dict:
     sitk_image = sitk.ReadImage(str(img_path))
     sitk_mask = sitk.ReadImage(str(mask_path))
 
@@ -90,7 +92,13 @@ def validate_case(case_id: str, img_path: Path, mask_path: Path, config_path: Pa
             c_name = parts[1].lower()
             f_name = "_".join(parts[2:]).lower().replace("_", "")
             key = f"{c_name}_{f_name}"
-            pyrad_features[key] = float(getattr(v.item() if hasattr(v, "item") else v, "real", v.item() if hasattr(v, "item") else v))
+            pyrad_features[key] = float(
+                getattr(
+                    v.item() if hasattr(v, "item") else v,
+                    "real",
+                    v.item() if hasattr(v, "item") else v,
+                )
+            )
 
     abs_diffs = []
     n_within = 0
@@ -108,12 +116,16 @@ def validate_case(case_id: str, img_path: Path, mask_path: Path, config_path: Pa
             if diff <= 1e-4:
                 n_within += 1
             else:
-                outliers.append((k, pyrad_key, fastrad_val, pyrad_features[pyrad_key], diff))
+                outliers.append(
+                    (k, pyrad_key, fastrad_val, pyrad_features[pyrad_key], diff)
+                )
 
     if outliers:
         print(f"    OUTLIERS for {case_id}:")
         for fk, pk, fv, pv, d in sorted(outliers, key=lambda x: -x[4]):
-            print(f"      {fk} (pyrad: {pk}): fastrad={fv:.6f}, pyradiomics={pv:.6f}, diff={d:.6f}")
+            print(
+                f"      {fk} (pyrad: {pk}): fastrad={fv:.6f}, pyradiomics={pv:.6f}, diff={d:.6f}"
+            )
 
     n_voxels = int(mask_tensor.sum().item())
     return {
@@ -135,10 +147,12 @@ def run():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not CASES:
-        msg = ("No cases configured in CASES list at the top of this script. "
-               "This script cannot run until you add real TCIA case IDs and "
-               "populate tests/fixtures/tcia/multicase/<case_id>/{image,label}.nrrd "
-               "for each one. See the module docstring for the expected layout.")
+        msg = (
+            "No cases configured in CASES list at the top of this script. "
+            "This script cannot run until you add real TCIA case IDs and "
+            "populate tests/fixtures/tcia/multicase/<case_id>/{image,label}.nrrd "
+            "for each one. See the module docstring for the expected layout."
+        )
         print(msg)
         return msg
 
@@ -154,7 +168,9 @@ def run():
         records.append(validate_case(case_id, img_path, mask_path, config_path))
 
     if not records:
-        msg = "No cases were actually validated (all files missing). See warnings above."
+        msg = (
+            "No cases were actually validated (all files missing). See warnings above."
+        )
         print(msg)
         return msg
 

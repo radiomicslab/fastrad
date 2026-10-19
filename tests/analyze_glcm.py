@@ -11,20 +11,26 @@ sitk_mask.SetSpacing((1.0, 1.0, 1.0))
 from radiomics import featureextractor
 
 extractor = featureextractor.RadiomicsFeatureExtractor()
-extractor.settings['binWidth'] = 25.0
-extractor.settings['distances'] = [1]
-extractor.settings['force2D'] = False
+extractor.settings["binWidth"] = 25.0
+extractor.settings["distances"] = [1]
+extractor.settings["force2D"] = False
 
 # We need to get the exact binned image to match.
 from radiomics import imageoperations
 
 bb, correctedMask = imageoperations.checkMask(sitk_image, sitk_mask)
-croppedImage, croppedMask = imageoperations.cropToTumorMask(sitk_image, correctedMask, bb)
-binnedImage, _ = imageoperations.binImage(extractor.settings['binWidth'], extractor.settings, croppedImage, croppedMask)
+croppedImage, croppedMask = imageoperations.cropToTumorMask(
+    sitk_image, correctedMask, bb
+)
+binnedImage, _ = imageoperations.binImage(
+    extractor.settings["binWidth"], extractor.settings, croppedImage, croppedMask
+)
 
 binned_arr = sitk.GetArrayFromImage(binnedImage)
 mask_arr = sitk.GetArrayFromImage(croppedMask)
-print(f"Binned Max: {np.max(binned_arr[mask_arr==1])}, Min: {np.min(binned_arr[mask_arr==1])}")
+print(
+    f"Binned Max: {np.max(binned_arr[mask_arr == 1])}, Min: {np.min(binned_arr[mask_arr == 1])}"
+)
 
 feature_class = glcm.RadiomicsGLCM(sitk_image, sitk_mask, **extractor.settings)
 feature_class.execute()

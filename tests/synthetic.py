@@ -7,6 +7,7 @@ whose intensities are heterogeneous. Irregular boundaries matter: they
 exercise marching-cubes configurations that a sphere or the IBSI phantom
 rarely hit.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -24,7 +25,7 @@ def make_case(
     """Returns (image HU float32 (z,y,x), mask uint8 {0,1}, spacing (z,y,x))."""
     rng = np.random.default_rng(seed)
     D, H, W = shape
-    z, y, x = np.ogrid[:D, :H, :W]
+    _z, y, x = np.ogrid[:D, :H, :W]
 
     img = np.full(shape, -1000.0, dtype=np.float32)  # air
     body = ((y - H / 2) / (0.42 * H)) ** 2 + ((x - W / 2) / (0.47 * W)) ** 2 <= 1
@@ -36,7 +37,9 @@ def make_case(
 
     # Irregular tumour: thresholded smooth noise, largest component kept
     bz, by, bx = roi_box
-    field = ndimage.gaussian_filter(rng.standard_normal(roi_box), sigma=rng.uniform(1.8, 3.0))
+    field = ndimage.gaussian_filter(
+        rng.standard_normal(roi_box), sigma=rng.uniform(1.8, 3.0)
+    )
     blob = field > np.quantile(field, 0.72)
     lab, n = ndimage.label(blob)
     blob = lab == (np.argmax(ndimage.sum(blob, lab, range(1, n + 1))) + 1)
@@ -46,13 +49,13 @@ def make_case(
     y0 = int(0.48 * H) - by // 2 + int(rng.integers(-8, 9))
     x0 = int(0.32 * W) - bx // 2 + int(rng.integers(-8, 9))
     mask = np.zeros(shape, dtype=np.uint8)
-    mask[z0:z0 + bz, y0:y0 + by, x0:x0 + bx] = blob
+    mask[z0 : z0 + bz, y0 : y0 + by, x0 : x0 + bx] = blob
 
     # Heterogeneous tumour intensities (necrotic core to enhancing rim)
     tumour_hu = ndimage.gaussian_filter(rng.standard_normal(roi_box), 2.0)
     tumour_hu = -20 + 110 * (tumour_hu - tumour_hu.min()) / (np.ptp(tumour_hu) + 1e-9)
     tumour_hu += rng.normal(0, 15, roi_box)
-    region = img[z0:z0 + bz, y0:y0 + by, x0:x0 + bx]
+    region = img[z0 : z0 + bz, y0 : y0 + by, x0 : x0 + bx]
     region[blob] = tumour_hu[blob]
 
     img = np.round(img)  # CT values are integers
@@ -61,6 +64,7 @@ def make_case(
 
 def to_sitk(img: np.ndarray, mask: np.ndarray, spacing):
     import SimpleITK as sitk
+
     si, sm = sitk.GetImageFromArray(img), sitk.GetImageFromArray(mask)
     for s in (si, sm):
         s.SetSpacing(tuple(float(v) for v in spacing[::-1]))  # SimpleITK is (x, y, z)
@@ -69,10 +73,14 @@ def to_sitk(img: np.ndarray, mask: np.ndarray, spacing):
 
 def to_fastrad(img: np.ndarray, mask: np.ndarray, spacing):
     import torch
+
     from fastrad import Mask, MedicalImage
+
     sp = tuple(float(v) for v in spacing)
-    return (MedicalImage(torch.from_numpy(img), spacing=sp),
-            Mask(torch.from_numpy(mask.astype(np.float32)), spacing=sp))
+    return (
+        MedicalImage(torch.from_numpy(img), spacing=sp),
+        Mask(torch.from_numpy(mask.astype(np.float32)), spacing=sp),
+    )
 
 
 # ---- fastrad key -> PyRadiomics key -------------------------------------
@@ -93,7 +101,9 @@ def pyrad_key(fastrad_key: str) -> str | None:
 
 def compare(fr: dict, pr: dict) -> list[tuple[str, float, float, float]]:
     """Returns (key, fastrad, pyradiomics, abs diff) for every comparable feature."""
-    pr_lower = {k.lower(): float(v) for k, v in pr.items() if not k.startswith("diagnostics")}
+    pr_lower = {
+        k.lower(): float(v) for k, v in pr.items() if not k.startswith("diagnostics")
+    }
     rows = []
     for k, v in fr.items():
         pk = pyrad_key(k)

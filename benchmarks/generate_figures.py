@@ -21,10 +21,12 @@ Produces PNG figures in benchmarks/figures/:
     A4_parity_scatter.png - Bland-Altman style parity plot
     A5_memory_scaling.png - CPU RAM (and GPU VRAM, if available) vs. ROI size
 """
+
 import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,8 +40,11 @@ FIGURES_DIR = PROJECT_ROOT / "benchmarks" / "figures"
 def _require(csv_name: str) -> pd.DataFrame:
     path = OUTPUT_DIR / csv_name
     if not path.exists():
-        print(f"ERROR: {path} does not exist. Run the benchmark script that "
-              f"produces it before calling generate_figures.py.", file=sys.stderr)
+        print(
+            f"ERROR: {path} does not exist. Run the benchmark script that "
+            f"produces it before calling generate_figures.py.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return pd.read_csv(path)
 
@@ -67,12 +72,19 @@ def fig_a1_architecture():
     n = len(stages)
     for i, label in enumerate(stages):
         x = i * 1.6
-        ax.add_patch(plt.Rectangle((x, 0), 1.3, 1, fill=True,
-                                    facecolor="#cfe8ff", edgecolor="black"))
+        ax.add_patch(
+            plt.Rectangle(
+                (x, 0), 1.3, 1, fill=True, facecolor="#cfe8ff", edgecolor="black"
+            )
+        )
         ax.text(x + 0.65, 0.5, label, ha="center", va="center", fontsize=8)
         if i < n - 1:
-            ax.annotate("", xy=(x + 1.5, 0.5), xytext=(x + 1.3, 0.5),
-                        arrowprops=dict(arrowstyle="->"))
+            ax.annotate(
+                "",
+                xy=(x + 1.5, 0.5),
+                xytext=(x + 1.3, 0.5),
+                arrowprops={"arrowstyle": "->"},
+            )
     ax.set_xlim(-0.3, n * 1.6)
     ax.set_ylim(-0.3, 1.3)
     ax.axis("off")
@@ -86,10 +98,22 @@ def fig_a2_gpu_scaling():
     """A2: end-to-end extraction time vs. ROI voxel count (single full calls), from runtime_table.csv."""
     df = _require("runtime_table.csv")
     fig, ax = plt.subplots(figsize=(6, 4.5))
-    ax.plot(df["voxel_count"], df["pyradiomics_median"], marker="o", label="PyRadiomics (1 thread)")
-    ax.plot(df["voxel_count"], df["fastrad_cpu_median"], marker="s", label="fastrad CPU (1 thread)")
+    ax.plot(
+        df["voxel_count"],
+        df["pyradiomics_median"],
+        marker="o",
+        label="PyRadiomics (1 thread)",
+    )
+    ax.plot(
+        df["voxel_count"],
+        df["fastrad_cpu_median"],
+        marker="s",
+        label="fastrad CPU (1 thread)",
+    )
     if not df["fastrad_gpu_median"].isna().all():
-        ax.plot(df["voxel_count"], df["fastrad_gpu_median"], marker="^", label="fastrad GPU")
+        ax.plot(
+            df["voxel_count"], df["fastrad_gpu_median"], marker="^", label="fastrad GPU"
+        )
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("ROI voxel count (log scale)")
@@ -116,8 +140,12 @@ def fig_a3_icc_scatter():
     ax.set_ylabel("fastrad ICC(2,1)")
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.05, 1.05)
-    n_subjects = df["n_subjects"].iloc[0] if "n_subjects" in df.columns and len(df) else "?"
-    ax.set_title(f"Per-feature ICC(2,1): fastrad vs. PyRadiomics (N={n_subjects} pairs)")
+    n_subjects = (
+        df["n_subjects"].iloc[0] if "n_subjects" in df.columns and len(df) else "?"
+    )
+    ax.set_title(
+        f"Per-feature ICC(2,1): fastrad vs. PyRadiomics (N={n_subjects} pairs)"
+    )
     ax.legend()
     fig.tight_layout()
     fig.savefig(FIGURES_DIR / "A3_icc_scatter.png", dpi=200)
@@ -160,8 +188,15 @@ def fig_a5_memory_scaling():
         return
 
     fig, ax = plt.subplots(figsize=(6, 4.5))
-    ax.plot(df["voxel_count"], df["pyradiomics_ram_mb"], marker="o", label="PyRadiomics CPU RAM")
-    ax.plot(df["voxel_count"], df["fastrad_cpu_ram_mb"], marker="s", label="fastrad CPU RAM")
+    ax.plot(
+        df["voxel_count"],
+        df["pyradiomics_ram_mb"],
+        marker="o",
+        label="PyRadiomics CPU RAM",
+    )
+    ax.plot(
+        df["voxel_count"], df["fastrad_cpu_ram_mb"], marker="s", label="fastrad CPU RAM"
+    )
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("ROI voxel count (log scale)")
@@ -181,13 +216,26 @@ def fig_a6_cohort_throughput():
     pyr = df[df["config"] == "pyradiomics"]
     cpu = df[df["config"] == "fastrad_cpu"]
     fig, ax = plt.subplots(figsize=(6, 4.5))
-    ax.plot(gpu["workers"], gpu["median_scans_per_min"], marker="o", label="fastrad, 1 GPU, K concurrent workers")
+    ax.plot(
+        gpu["workers"],
+        gpu["median_scans_per_min"],
+        marker="o",
+        label="fastrad, 1 GPU, K concurrent workers",
+    )
     for _, r in pyr.iterrows():
-        ax.axhline(r["median_scans_per_min"], color="C1", linestyle="--",
-                   label=f"PyRadiomics, {int(r['workers'])} CPU processes")
+        ax.axhline(
+            r["median_scans_per_min"],
+            color="C1",
+            linestyle="--",
+            label=f"PyRadiomics, {int(r['workers'])} CPU processes",
+        )
     for i, (_, r) in enumerate(cpu.iterrows()):
-        ax.axhline(r["median_scans_per_min"], color="C2", linestyle=[":", "-."][i % 2],
-                   label=f"fastrad CPU, {int(r['workers'])} processes")
+        ax.axhline(
+            r["median_scans_per_min"],
+            color="C2",
+            linestyle=[":", "-."][i % 2],
+            label=f"fastrad CPU, {int(r['workers'])} processes",
+        )
     ax.set_xlabel("Concurrent GPU workers K")
     ax.set_ylabel("Cohort throughput (scans/min)")
     ax.set_title("Cohort throughput")

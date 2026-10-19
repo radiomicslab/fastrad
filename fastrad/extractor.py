@@ -61,12 +61,21 @@ def _to_python_floats(features: dict) -> dict:
     synchronisations; stacking them first needs one.
     """
     tensor_keys = [k for k, v in features.items() if isinstance(v, torch.Tensor)]
-    out = {k: (float(v) if not isinstance(v, torch.Tensor) else None) for k, v in features.items()}
+    out = {
+        k: (float(v) if not isinstance(v, torch.Tensor) else None)
+        for k, v in features.items()
+    }
     by_device: dict = {}
     for k in tensor_keys:
         by_device.setdefault(features[k].device, []).append(k)
     for keys in by_device.values():
-        vals = torch.stack([features[k].detach().reshape(()).to(torch.float64) for k in keys]).cpu().tolist()
+        vals = (
+            torch.stack(
+                [features[k].detach().reshape(()).to(torch.float64) for k in keys]
+            )
+            .cpu()
+            .tolist()
+        )
         out.update(zip(keys, vals))
     return out
 
@@ -79,22 +88,24 @@ _FEATURE_MAP = {
     "glrlm": compute_glrlm,
     "glszm": compute_glszm,
     "gldm": compute_gldm,
-    "ngtdm": compute_ngtdm
+    "ngtdm": compute_ngtdm,
 }
+
 
 class FeatureExtractor:
     """
     Main orchestration engine for radiomics feature extraction.
-    
+
     The FeatureExtractor consumes a FeatureSettings configuration and executes
-    the specified feature class modules against a provided image and mask. 
+    the specified feature class modules against a provided image and mask.
     It automatically routes tensors to the requested device (CPU, CUDA, MPS)
     and handles OutOfMemory fallbacks gracefully.
     """
+
     def __init__(self, settings: FeatureSettings):
         """
         Initializes the FeatureExtractor with the given settings.
-        
+
         Args:
             settings (FeatureSettings): Configuration defining which features to compute.
         """
@@ -104,17 +115,19 @@ class FeatureExtractor:
     def extract(self, image: MedicalImage, mask: Mask) -> dict[str, float]:
         """
         Executes feature extraction on the given Image and Mask.
-        
+
         Args:
             image (MedicalImage): The baseline medical volume.
             mask (Mask): The binary Region of Interest mask.
-            
+
         Returns:
             dict[str, float]: A dictionary mapping feature names to their computed values.
         """
         # Ensure image and mask are same shape
         if image.tensor.shape != mask.tensor.shape:
-            raise ValueError(f"Image shape {image.tensor.shape} and mask shape {mask.tensor.shape} do not match.")
+            raise ValueError(
+                f"Image shape {image.tensor.shape} and mask shape {mask.tensor.shape} do not match."
+            )
 
         # Crop to the ROI before moving anything to the device: only the
         # bounding box (plus a 1-voxel margin) is transferred and processed.
@@ -127,18 +140,18 @@ class FeatureExtractor:
         self.settings.spacing = image.spacing
 
         # Robustness Checks
-        
+
         # 1. Empty Mask Check
         if mask_sum == 0:
             raise ValueError("Mask contains no positive voxels.")
-            
+
         # 2. Single-Voxel ROI Check
         if mask_sum == 1:
             logger.warning(
                 "Mask contains exactly one positive voxel. "
                 "Many spatial and textural features cannot be computed validly."
             )
-            
+
         # 3. Non-Isotropic Spacing Check
         sp = image.spacing
         if max(sp) - min(sp) > 1e-3:
@@ -147,7 +160,7 @@ class FeatureExtractor:
                 "PyRadiomics guidelines recommend resampling to isotropic spacing "
                 "for robust textural feature calculation.",
                 UserWarning,
-                stacklevel=2
+                stacklevel=2,
             )
 
         # Texture classes share one grey-level binning per extraction.
@@ -161,29 +174,35 @@ class FeatureExtractor:
 
         return features
 
-    def _compute_classes(self, img_tensor: torch.Tensor, mask_tensor: torch.Tensor) -> dict:
+    def _compute_classes(
+        self, img_tensor: torch.Tensor, mask_tensor: torch.Tensor
+    ) -> dict:
         features = {}
         for feature_class in self.settings.feature_classes:
             if feature_class not in _FEATURE_MAP:
                 raise ValueError(f"Unknown feature class: {feature_class}")
-            
+
             compute_fn = _FEATURE_MAP[feature_class]
-            
-            device_type = "cuda" if self.device == "cuda" else ("cpu" if self.device == "cpu" else None)
-            
+
+            device_type = (
+                "cuda"
+                if self.device == "cuda"
+                else ("cpu" if self.device == "cpu" else None)
+            )
+
             try:
                 if self.settings.amp and device_type:
                     with torch.autocast(device_type=device_type):
                         class_features = compute_fn(
                             image_tensor=img_tensor,
                             mask_tensor=mask_tensor,
-                            settings=self.settings
+                            settings=self.settings,
                         )
                 else:
                     class_features = compute_fn(
                         image_tensor=img_tensor,
                         mask_tensor=mask_tensor,
-                        settings=self.settings
+                        settings=self.settings,
                     )
             except torch.cuda.OutOfMemoryError:
                 if self.device == "cuda":
@@ -193,31 +212,31 @@ class FeatureExtractor:
                     )
                     # Clear CUDA cache
                     torch.cuda.empty_cache()
-                    
+
                     # Move tensors to CPU explicitly for this computation
                     cpu_img_tensor = img_tensor.cpu()
                     cpu_mask_tensor = mask_tensor.cpu()
-                    
+
                     # Compute on CPU
                     if self.settings.amp:
                         with torch.autocast(device_type="cpu"):
                             class_features = compute_fn(
                                 image_tensor=cpu_img_tensor,
                                 mask_tensor=cpu_mask_tensor,
-                                settings=self.settings
+                                settings=self.settings,
                             )
                     else:
                         class_features = compute_fn(
                             image_tensor=cpu_img_tensor,
                             mask_tensor=cpu_mask_tensor,
-                            settings=self.settings
+                            settings=self.settings,
                         )
-                    
+
                     # Free up CPU memory
                     del cpu_img_tensor
                     del cpu_mask_tensor
                 else:
                     raise
-            
+
             features.update(class_features)
         return features

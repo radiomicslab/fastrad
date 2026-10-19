@@ -9,21 +9,21 @@ def test_builtin_filters():
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     img_dir = os.path.join(base_dir, "fixtures", "image")
-    
+
     img = MedicalImage.from_dicom(img_dir)
     original_shape = img.tensor.shape
-    
+
     params = {
         "Original": {},
         "LoG": {"sigma": [1.0, 3.0]},
         "Square": {},
         "Logarithm": {},
-        "Exponential": {}
+        "Exponential": {},
     }
-    
+
     # 1. Pipeline Execution
     filtered_images = apply_builtin_filters(img, params)
-    
+
     # Expected specific keys exactly matching PyRadiomics architecture hooks
     expected_keys = [
         "original",
@@ -31,9 +31,9 @@ def test_builtin_filters():
         "log-sigma-3-0-mm-3D",
         "square",
         "logarithm",
-        "exponential"
+        "exponential",
     ]
-    
+
     for key in expected_keys:
         assert key in filtered_images
         # Verify boundary coordinates mapped identically across filters bypassing GPU padding shifting

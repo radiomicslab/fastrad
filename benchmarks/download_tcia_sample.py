@@ -28,9 +28,10 @@ REQUIRES: pip install rt-utils pydicom SimpleITK requests
 DICOM RTSTRUCT files aligned to a reference CT series --
 https://github.com/qurit/rt-utils)
 """
+
+import io
 import shutil
 import zipfile
-import io
 from pathlib import Path
 
 import numpy as np
@@ -183,8 +184,10 @@ def download_one_case(patient_id: str, is_primary_case: bool = False) -> bool:
     label_ok = list(unique_vals) == [0, 1]
     print(f"  Wrote {img_out}")
     print(f"  Wrote {mask_out}")
-    print(f"  Label check: unique values = {unique_vals} "
-          f"{'OK' if label_ok else '*** WARNING: NOT [0, 1] -- multi-structure mask, do not use as-is ***'}")
+    print(
+        f"  Label check: unique values = {unique_vals} "
+        f"{'OK' if label_ok else '*** WARNING: NOT [0, 1] -- multi-structure mask, do not use as-is ***'}"
+    )
 
     shutil.rmtree(work_dir, ignore_errors=True)
     return label_ok
@@ -192,18 +195,25 @@ def download_one_case(patient_id: str, is_primary_case: bool = False) -> bool:
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--force-primary", action="store_true",
-                         help="Re-download and OVERWRITE the primary case "
-                              "(lung1_image.nrrd/lung1_label.nrrd) even if it "
-                              "already exists. Off by default, because this "
-                              "file is the ground truth used by every other "
-                              "clinical-case benchmark script -- overwriting "
-                              "it silently once already caused every "
-                              "downstream benchmark to start measuring a "
-                              "different, un-flagged patient.")
-    parser.add_argument("--skip-additional", action="store_true",
-                         help="Only handle the primary case; skip ADDITIONAL_CASES.")
+    parser.add_argument(
+        "--force-primary",
+        action="store_true",
+        help="Re-download and OVERWRITE the primary case "
+        "(lung1_image.nrrd/lung1_label.nrrd) even if it "
+        "already exists. Off by default, because this "
+        "file is the ground truth used by every other "
+        "clinical-case benchmark script -- overwriting "
+        "it silently once already caused every "
+        "downstream benchmark to start measuring a "
+        "different, un-flagged patient.",
+    )
+    parser.add_argument(
+        "--skip-additional",
+        action="store_true",
+        help="Only handle the primary case; skip ADDITIONAL_CASES.",
+    )
     args = parser.parse_args()
 
     # Additional cases beyond the primary LUNG1-001 case, for multi-case
@@ -220,11 +230,13 @@ def main():
     primary_img = FIXTURE_DIR / "lung1_image.nrrd"
     primary_mask = FIXTURE_DIR / "lung1_label.nrrd"
     if primary_img.exists() and primary_mask.exists() and not args.force_primary:
-        print(f"Primary case files already exist at {primary_img} / {primary_mask}. "
-              f"Skipping re-download (every other clinical-case benchmark script "
-              f"depends on this file staying stable -- pass --force-primary to "
-              f"deliberately overwrite it, and re-run every downstream benchmark "
-              f"afterward if you do).")
+        print(
+            f"Primary case files already exist at {primary_img} / {primary_mask}. "
+            f"Skipping re-download (every other clinical-case benchmark script "
+            f"depends on this file staying stable -- pass --force-primary to "
+            f"deliberately overwrite it, and re-run every downstream benchmark "
+            f"afterward if you do)."
+        )
     else:
         print("Downloading primary case (LUNG1-001)...")
         download_one_case(PATIENT_ID, is_primary_case=True)
@@ -232,7 +244,9 @@ def main():
     if args.skip_additional:
         return
 
-    print(f"\nDownloading {len(ADDITIONAL_CASES)} additional cases for multi-case validation...")
+    print(
+        f"\nDownloading {len(ADDITIONAL_CASES)} additional cases for multi-case validation..."
+    )
     results = {}
     for pid in ADDITIONAL_CASES:
         results[pid] = download_one_case(pid, is_primary_case=False)
@@ -241,7 +255,9 @@ def main():
     for pid, ok in results.items():
         print(f"  {pid}: {'OK' if ok else 'FAILED/SKIPPED'}")
     succeeded = [pid for pid, ok in results.items() if ok]
-    print(f"\n{len(succeeded)}/{len(ADDITIONAL_CASES)} additional cases succeeded: {succeeded}")
+    print(
+        f"\n{len(succeeded)}/{len(ADDITIONAL_CASES)} additional cases succeeded: {succeeded}"
+    )
     print("Paste the succeeded list above into CASES in run_multicase_validation.py.")
 
 

@@ -5,16 +5,21 @@ from fastrad.settings import FeatureSettings
 
 EPSILON = 1e-16
 
-def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings) -> dict[str, float]:
+
+def _compute_core(
+    image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings
+) -> dict[str, float]:
     device = image_tensor.device
-    
-    binned_image, ivector = get_binned_image(image_tensor, mask_tensor, settings.bin_width)
+
+    binned_image, ivector = get_binned_image(
+        image_tensor, mask_tensor, settings.bin_width
+    )
     Ng = ivector.numel()
     if Ng == 0:
         return {}
-        
+
     voxels = image_tensor[mask_tensor > 0.5]
-        
+
     angles = [
         (0, 0, 1),
         (0, 1, 0),
@@ -28,9 +33,9 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
         (1, 1, -1),
         (1, -1, 0),
         (1, -1, 1),
-        (1, -1, -1)
+        (1, -1, -1),
     ]
-    
+
     img_int = binned_image.to(torch.int64)
     M = mask_tensor > 0.5
     D, H, W = img_int.shape
@@ -42,31 +47,35 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
     # puts each line's ROI voxels in order; a run starts wherever the line
     # changes, t is not consecutive (the ROI is interrupted) or the grey level
     # changes. This is exactly the run definition of the original loop.
-    coords = torch.nonzero(M)                                   # (N, 3)
+    coords = torch.nonzero(M)  # (N, 3)
     if coords.shape[0] == 0:
         return {}
-    gl = img_int[M]                                             # (N,) same order
+    gl = img_int[M]  # (N,) same order
     d_t = torch.tensor(angles, dtype=torch.int64, device=device)  # (13, 3)
     N_a = d_t.shape[0]
-    axis = torch.tensor([next(i for i in range(3) if a[i] != 0) for a in angles], device=device)
-    t = coords[:, axis].T                                       # (13, N)
+    axis = torch.tensor(
+        [next(i for i in range(3) if a[i] != 0) for a in angles], device=device
+    )
+    t = coords[:, axis].T  # (13, N)
     base = coords.unsqueeze(0) - t.unsqueeze(-1) * d_t.unsqueeze(1)  # (13, N, 3)
-    S = D + H + W                                               # makes base components >= 0
+    S = D + H + W  # makes base components >= 0
     R = 2 * S + 1
     T = max(D, H, W) + 2
-    line = ((base[..., 0] + S) * R + (base[..., 1] + S)) * R + (base[..., 2] + S)  # (13, N)
+    line = ((base[..., 0] + S) * R + (base[..., 1] + S)) * R + (
+        base[..., 2] + S
+    )  # (13, N)
     a_ids = torch.arange(N_a, device=device).view(-1, 1)
-    key = (a_ids * (R ** 3) + line) * T + t                     # unique per (direction, voxel)
+    key = (a_ids * (R**3) + line) * T + t  # unique per (direction, voxel)
     key = key.reshape(-1)
     order = torch.argsort(key)
     key_s = key[order]
     g_s = gl.repeat(N_a)[order]
     a_s = a_ids.expand(-1, coords.shape[0]).reshape(-1)[order]
-    same_line_next = (key_s[1:] - key_s[:-1]) == 1              # same direction+line, t consecutive
+    same_line_next = (key_s[1:] - key_s[:-1]) == 1  # same direction+line, t consecutive
     new_run = torch.ones_like(key_s, dtype=torch.bool)
     new_run[1:] = ~(same_line_next & (g_s[1:] == g_s[:-1]))
     run_id = torch.cumsum(new_run.to(torch.int64), 0) - 1
-    lengths = torch.bincount(run_id)                            # (n_runs,)
+    lengths = torch.bincount(run_id)  # (n_runs,)
     run_gray = g_s[new_run]
     run_angle = a_s[new_run]
 
@@ -80,64 +89,68 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
 
     valid_idx = (ivector - 1).to(torch.int64)
     P_glrlm = P_glrlm_raw[valid_idx, :, :]
-        
+
     sums = torch.sum(P_glrlm, dim=(0, 1))
     valid_angles = sums > 0
     if not torch.any(valid_angles):
         return {}
-        
+
     P_glrlm = P_glrlm[:, :, valid_angles]
     sums = sums[valid_angles]
-    
+
     N_a = P_glrlm.shape[2]
-    
+
     Np = voxels.numel()
-    
+
     P = P_glrlm
     Ns = sums
-    
+
     i_grid = ivector.clone().to(device).view(-1, 1, 1)
     j_grid = torch.arange(1, Nr + 1, dtype=torch.float64, device=device).view(1, -1, 1)
-    
+
     pg = torch.sum(P, dim=1)
     pr = torch.sum(P, dim=0)
-    
+
     sre = torch.mean(torch.sum(pr / (j_grid.view(-1, 1) ** 2), dim=0) / Ns)
-    
+
     lre = torch.mean(torch.sum(pr * (j_grid.view(-1, 1) ** 2), dim=0) / Ns)
-    
-    glnu = torch.mean(torch.sum(pg ** 2, dim=0) / Ns)
-    
-    glnun = torch.mean(torch.sum(pg ** 2, dim=0) / (Ns ** 2))
-    
-    rlnu = torch.mean(torch.sum(pr ** 2, dim=0) / Ns)
-    
-    rlnun = torch.mean(torch.sum(pr ** 2, dim=0) / (Ns ** 2))
-    
+
+    glnu = torch.mean(torch.sum(pg**2, dim=0) / Ns)
+
+    glnun = torch.mean(torch.sum(pg**2, dim=0) / (Ns**2))
+
+    rlnu = torch.mean(torch.sum(pr**2, dim=0) / Ns)
+
+    rlnun = torch.mean(torch.sum(pr**2, dim=0) / (Ns**2))
+
     rp = torch.mean(Ns / Np)
-    
+
     p_norm = P / Ns.view(1, 1, -1)
     mu_i = torch.sum(i_grid * p_norm, dim=(0, 1))
-    glv = torch.mean(torch.sum(((i_grid - mu_i.view(1, 1, -1)) ** 2) * p_norm, dim=(0, 1)))
-    
+    glv = torch.mean(
+        torch.sum(((i_grid - mu_i.view(1, 1, -1)) ** 2) * p_norm, dim=(0, 1))
+    )
+
     mu_j = torch.sum(j_grid * p_norm, dim=(0, 1))
-    rv = torch.mean(torch.sum(((j_grid - mu_j.view(1, 1, -1)) ** 2) * p_norm, dim=(0, 1)))
-    
+    rv = torch.mean(
+        torch.sum(((j_grid - mu_j.view(1, 1, -1)) ** 2) * p_norm, dim=(0, 1))
+    )
+
     p_log = torch.where(p_norm > EPSILON, torch.log2(p_norm), torch.zeros_like(p_norm))
     re_feat = torch.mean(-torch.sum(p_norm * p_log, dim=(0, 1)))
-    
+
     lglre = torch.mean(torch.sum(pg / (i_grid.squeeze(-1) ** 2), dim=0) / Ns)
-    
+
     hglre = torch.mean(torch.sum(pg * (i_grid.squeeze(-1) ** 2), dim=0) / Ns)
-    
-    srlgle = torch.mean(torch.sum(P / ((i_grid ** 2) * (j_grid ** 2)), dim=(0, 1)) / Ns)
-    
-    srhgle = torch.mean(torch.sum(P * (i_grid ** 2) / (j_grid ** 2), dim=(0, 1)) / Ns)
-    
-    lrlgle = torch.mean(torch.sum(P * (j_grid ** 2) / (i_grid ** 2), dim=(0, 1)) / Ns)
-    
-    lrhgle = torch.mean(torch.sum(P * (i_grid ** 2) * (j_grid ** 2), dim=(0, 1)) / Ns)
-    
+
+    srlgle = torch.mean(torch.sum(P / ((i_grid**2) * (j_grid**2)), dim=(0, 1)) / Ns)
+
+    srhgle = torch.mean(torch.sum(P * (i_grid**2) / (j_grid**2), dim=(0, 1)) / Ns)
+
+    lrlgle = torch.mean(torch.sum(P * (j_grid**2) / (i_grid**2), dim=(0, 1)) / Ns)
+
+    lrhgle = torch.mean(torch.sum(P * (i_grid**2) * (j_grid**2), dim=(0, 1)) / Ns)
+
     features = {
         "glrlm:short_run_emphasis": sre,
         "glrlm:long_run_emphasis": lre,
@@ -154,14 +167,18 @@ def _compute_core(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, setting
         "glrlm:short_run_low_gray_level_emphasis": srlgle,
         "glrlm:short_run_high_gray_level_emphasis": srhgle,
         "glrlm:long_run_low_gray_level_emphasis": lrlgle,
-        "glrlm:long_run_high_gray_level_emphasis": lrhgle
+        "glrlm:long_run_high_gray_level_emphasis": lrhgle,
     }
-    
+
     return features  # type: ignore
+
 
 _compiled_compute = None
 
-def compute(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings) -> dict[str, float]:
+
+def compute(
+    image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings
+) -> dict[str, float]:
     global _compiled_compute
     if settings.compile:
         if _compiled_compute is None:

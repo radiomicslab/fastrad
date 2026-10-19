@@ -6,6 +6,7 @@ marching-cubes configurations (and texture edge cases) that spheres and the
 IBSI phantom do not. Tolerance: 1e-6 relative (absolute below magnitude 1);
 in practice agreement is ~1e-11 or better.
 """
+
 import warnings
 
 import numpy as np
@@ -13,15 +14,18 @@ import pytest
 import torch
 
 radiomics = pytest.importorskip("radiomics")
-from radiomics import featureextractor, setVerbosity  # noqa: E402
+from radiomics import featureextractor, setVerbosity
 
-from fastrad import FeatureExtractor, FeatureSettings  # noqa: E402
-from tests.synthetic import compare, make_case, to_fastrad, to_sitk  # noqa: E402
+from fastrad import FeatureExtractor, FeatureSettings
+from tests.synthetic import compare, make_case, to_fastrad, to_sitk
 
 CONFIG = {
     "setting": {"binWidth": 25.0, "label": 1},
     "imageType": {"Original": {}},
-    "featureClass": {c: None for c in ["shape", "firstorder", "glcm", "glrlm", "glszm", "gldm", "ngtdm"]},
+    "featureClass": {
+        c: None
+        for c in ["shape", "firstorder", "glcm", "glrlm", "glszm", "gldm", "ngtdm"]
+    },
 }
 TOL = 1e-6
 
@@ -34,13 +38,17 @@ def pyrad():
 
 @pytest.mark.parametrize("seed", [0, 2, 3])
 def test_all_features_match_pyradiomics(pyrad, seed):
-    img, mask, spacing = make_case(shape=(48, 128, 128), roi_box=(20, 48, 48), seed=seed)
+    img, mask, spacing = make_case(
+        shape=(48, 128, 128), roi_box=(20, 48, 48), seed=seed
+    )
     si, sm = to_sitk(img, mask, spacing)
     fi, fm = to_fastrad(img, mask, spacing)
     expected = pyrad.execute(si, sm)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        got = FeatureExtractor(FeatureSettings.from_dict(CONFIG, device="cpu")).extract(fi, fm)
+        got = FeatureExtractor(FeatureSettings.from_dict(CONFIG, device="cpu")).extract(
+            fi, fm
+        )
     rows = compare(got, expected)
     assert len(rows) == 107
     bad = [(k, a, b) for k, a, b, d in rows if d > TOL * max(1.0, abs(b))]
@@ -51,12 +59,15 @@ def test_all_features_match_pyradiomics(pyrad, seed):
 def test_glszm_slab_labelling_matches_per_level(monkeypatch, batch_voxels):
     """The batched slab labelling (used on GPU) must find exactly the same zones as per-level labelling."""
     from fastrad.features import glszm
+
     img, mask, _ = make_case(shape=(40, 96, 96), roi_box=(16, 40, 40), seed=5)
     levels = np.floor(img / 25.0).astype(np.int64)
     levels = np.where(mask > 0, levels - levels[mask > 0].min() + 1, 0)
     t = torch.from_numpy(levels)
     n = int(t.max())
-    monkeypatch.setattr(glszm, "_LABEL_BATCH_VOXELS", batch_voxels)  # 1 => one level per call
+    monkeypatch.setattr(
+        glszm, "_LABEL_BATCH_VOXELS", batch_voxels
+    )  # 1 => one level per call
     a = glszm._label_zones(t, n, use_slabs=True)
     b = glszm._label_zones(t, n, use_slabs=False)
 
@@ -87,5 +98,9 @@ def test_default_device_auto_runs():
     img, mask, spacing = make_case(shape=(30, 64, 64), roi_box=(12, 24, 24), seed=4)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        out = FeatureExtractor(FeatureSettings()).extract(*to_fastrad(img, mask, spacing))
-    assert len(out) > 100 and all(np.isfinite(v) for k, v in out.items() if "mcc" not in k)
+        out = FeatureExtractor(FeatureSettings()).extract(
+            *to_fastrad(img, mask, spacing)
+        )
+    assert len(out) > 100 and all(
+        np.isfinite(v) for k, v in out.items() if "mcc" not in k
+    )

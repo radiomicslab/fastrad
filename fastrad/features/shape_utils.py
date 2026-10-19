@@ -3,6 +3,7 @@ import torch
 from scipy.spatial import ConvexHull
 
 from fastrad.logger import logger
+
 from .shape_tables import gridAngles, triTable, vertList
 
 
@@ -45,7 +46,7 @@ def _max_2d_diameters(verts: np.ndarray) -> list[float]:
     out = [0.0, 0.0, 0.0]
     for i in range(3):
         u, v = [j for j in range(3) if j != i]
-        cand = _line_extremes(verts, i, u, v)        # sorted by plane i
+        cand = _line_extremes(verts, i, u, v)  # sorted by plane i
         bounds = np.flatnonzero(np.diff(cand[:, i])) + 1
         for grp in np.split(cand[:, [u, v]], bounds):
             out[i] = max(out[i], _farthest_pair_distance(grp))
@@ -63,12 +64,18 @@ def _line_extreme_mask(H: torch.Tensor, a: int, b: int, c: int) -> torch.Tensor:
     _, line = torch.unique(H[:, a] * width + H[:, b], return_inverse=True)
     n = int(line.max()) + 1
     big = torch.iinfo(torch.int64).max
-    lo = torch.full((n,), big, dtype=torch.int64, device=H.device).scatter_reduce(0, line, H[:, c], "amin")
-    hi = torch.full((n,), -big, dtype=torch.int64, device=H.device).scatter_reduce(0, line, H[:, c], "amax")
+    lo = torch.full((n,), big, dtype=torch.int64, device=H.device).scatter_reduce(
+        0, line, H[:, c], "amin"
+    )
+    hi = torch.full((n,), -big, dtype=torch.int64, device=H.device).scatter_reduce(
+        0, line, H[:, c], "amax"
+    )
     return (H[:, c] == lo[line]) | (H[:, c] == hi[line])
 
 
-def _max_2d_diameters_t(H: torch.Tensor, P: torch.Tensor, max_pairs: int = 4_000_000) -> list[float]:
+def _max_2d_diameters_t(
+    H: torch.Tensor, P: torch.Tensor, max_pairs: int = 4_000_000
+) -> list[float]:
     """Batched in-plane farthest-pair distances (PyRadiomics' 2D diameters).
 
     H: unique vertices on the half-voxel grid (int64), P: their physical
@@ -95,7 +102,7 @@ def _max_2d_diameters_t(H: torch.Tensor, P: torch.Tensor, max_pairs: int = 4_000
         step = max(1, max_pairs // (width * width))
         best = torch.zeros((), dtype=Pc.dtype, device=H.device)
         for g0 in range(0, n_planes, step):
-            blk = padded[g0:g0 + step]
+            blk = padded[g0 : g0 + step]
             d2 = ((blk.unsqueeze(2) - blk.unsqueeze(1)) ** 2).sum(-1)
             best = torch.maximum(best, d2.max())
         out[i] = best
@@ -119,16 +126,19 @@ def calculate_mesh_features(mask_tensor, spacing):
     D, H, W = mask_tensor.shape
     # Pad by 1 on all sides so boundary faces are fully captured
     padded_mask = torch.zeros((D + 2, H + 2, W + 2), dtype=torch.uint8, device=device)
-    padded_mask[1:-1, 1:-1, 1:-1] = (mask_tensor > 0.5)
+    padded_mask[1:-1, 1:-1, 1:-1] = mask_tensor > 0.5
 
     cube_idx = torch.zeros((D + 1, H + 1, W + 1), dtype=torch.uint8, device=device)
     for a_idx in range(8):
         c_z, c_y, c_x = gridAngles_t[a_idx]
-        cube_idx |= padded_mask[c_z:c_z + D + 1, c_y:c_y + H + 1, c_x:c_x + W + 1] << a_idx
+        cube_idx |= (
+            padded_mask[c_z : c_z + D + 1, c_y : c_y + H + 1, c_x : c_x + W + 1]
+            << a_idx
+        )
 
     valid_cubes = (cube_idx > 0) & (cube_idx < 255)
-    active = torch.nonzero(valid_cubes)                       # (C, 3)
-    active_idxs = cube_idx[valid_cubes].to(torch.int64)       # same order as nonzero
+    active = torch.nonzero(valid_cubes)  # (C, 3)
+    active_idxs = cube_idx[valid_cubes].to(torch.int64)  # same order as nonzero
 
     # Symmetry: configurations >= 128 are looked up flipped, with the volume sign flipped
     flip = active_idxs >= 128
@@ -136,14 +146,16 @@ def calculate_mesh_features(mask_tensor, spacing):
     lookup = torch.where(flip, active_idxs ^ 255, active_idxs)
 
     # Coordinates relative to the input mask (padded index - 1)
-    offsets = active.to(torch.float64) - 1.0                  # (C, 3)
-    tri = triTable_t[lookup][:, :15].view(-1, 5, 3)           # (C, 5, 3) edge ids, -1 = none
-    valid_tri = tri[:, :, 0] >= 0                             # (C, 5)
-    cube_of_tri = torch.arange(tri.shape[0], device=device).view(-1, 1).expand(-1, 5)[valid_tri]
-    edges = tri[valid_tri]                                    # (T, 3)
+    offsets = active.to(torch.float64) - 1.0  # (C, 3)
+    tri = triTable_t[lookup][:, :15].view(-1, 5, 3)  # (C, 5, 3) edge ids, -1 = none
+    valid_tri = tri[:, :, 0] >= 0  # (C, 5)
+    cube_of_tri = (
+        torch.arange(tri.shape[0], device=device).view(-1, 1).expand(-1, 5)[valid_tri]
+    )
+    edges = tri[valid_tri]  # (T, 3)
 
     spacing_t = torch.tensor(spacing, device=device, dtype=torch.float64)
-    off = offsets[cube_of_tri]                                # (T, 3)
+    off = offsets[cube_of_tri]  # (T, 3)
     a = (vertList_t[edges[:, 0]] + off) * spacing_t
     b = (vertList_t[edges[:, 1]] + off) * spacing_t
     c = (vertList_t[edges[:, 2]] + off) * spacing_t
@@ -153,7 +165,13 @@ def calculate_mesh_features(mask_tensor, spacing):
     vol = (torch.cross(a, b, dim=1) * c).sum(dim=1) * sgn
     normals = 0.5 * torch.cross(b - a, c - a, dim=1) * sgn.unsqueeze(1)
 
-    totals = torch.stack([area.sum(), vol.sum(), torch.linalg.vector_norm(normals.sum(dim=0))]).cpu().tolist()
+    totals = (
+        torch.stack(
+            [area.sum(), vol.sum(), torch.linalg.vector_norm(normals.sum(dim=0))]
+        )
+        .cpu()
+        .tolist()
+    )
     total_area, total_volume, mesh_closure_error = totals
 
     # Mesh-closure diagnostic. The sum of signed triangle-area vectors is zero
@@ -178,8 +196,10 @@ def calculate_mesh_features(mask_tensor, spacing):
         # grid coordinate is an exact integer. Physical coordinates are
         # rebuilt as (half_index / 2) * spacing, which is bit-identical to the
         # (vertex + offset) * spacing values used above.
-        corners = vertList_t[edges.reshape(-1)] + off.repeat_interleave(3, dim=0)  # (3T, 3)
-        half = torch.round(corners * 2).to(torch.int64) + 2               # >= 0
+        corners = vertList_t[edges.reshape(-1)] + off.repeat_interleave(
+            3, dim=0
+        )  # (3T, 3)
+        half = torch.round(corners * 2).to(torch.int64) + 2  # >= 0
         dims = half.max(dim=0).values + 1
         key = (half[:, 0] * dims[1] + half[:, 1]) * dims[2] + half[:, 2]
         ukey = torch.unique(key)

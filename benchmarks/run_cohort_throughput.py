@@ -23,6 +23,7 @@ Both pairs must describe the same image and the same binary mask.
 
 Outputs  <out>.json  (everything) and <out>.csv  (one row per configuration).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -45,6 +46,7 @@ DEFAULT_OUT_DIR = PROJECT_ROOT / "benchmarks" / "outputs"
 # --------------------------------------------------------------------------
 # Adapters -- match fastrad codebase I/O and FeatureExtractor API
 # --------------------------------------------------------------------------
+
 
 def load_fastrad_case(image_path: str, mask_path: str):
     """
@@ -92,6 +94,7 @@ def make_fastrad_extractor(device: str, pyradiomics_config: str):
     parity benchmark and pyradiomics_config.yaml exactly.
     """
     from fastrad import FeatureExtractor, FeatureSettings
+
     settings = FeatureSettings.from_yaml(pyradiomics_config, device=device)
     return FeatureExtractor(settings)
 
@@ -116,9 +119,11 @@ def _to_float_dict(d: dict) -> dict[str, float]:
 def _quiet_logs():
     """Silence per-case warnings in workers (they flood the log, not the result)."""
     import warnings
+
     warnings.filterwarnings("ignore")
     try:
         from loguru import logger
+
         logger.remove()
         logger.add(sys.stderr, level="ERROR")
     except Exception:
@@ -127,8 +132,13 @@ def _quiet_logs():
 
 def _single_thread_env():
     """Must run before numpy/scipy/torch are imported in a spawned worker."""
-    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    for var in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
         os.environ[var] = "1"
 
 
@@ -136,6 +146,7 @@ def _fastrad_init(device: str, cfg: str, warm_img: str, warm_mask: str):
     _single_thread_env()
     _quiet_logs()
     import torch
+
     torch.set_num_threads(1)  # one core per worker; avoid CPU oversubscription
     try:
         torch.set_num_interop_threads(1)
@@ -145,7 +156,7 @@ def _fastrad_init(device: str, cfg: str, warm_img: str, warm_mask: str):
     _W["device"] = device
     _W["ex"] = make_fastrad_extractor(device, cfg)
     img, msk = load_fastrad_case(warm_img, warm_mask)
-    _W["ex"].extract(img, msk)          # warm-up: CUDA context, kernels, CuPy
+    _W["ex"].extract(img, msk)  # warm-up: CUDA context, kernels, CuPy
     if device == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize()
 
@@ -153,7 +164,7 @@ def _fastrad_init(device: str, cfg: str, warm_img: str, warm_mask: str):
 def _fastrad_task(case_id: str, img_path: str, mask_path: str):
     torch = _W["torch"]
     t0 = time.perf_counter()
-    img, msk = load_fastrad_case(img_path, mask_path)          # I/O included
+    img, msk = load_fastrad_case(img_path, mask_path)  # I/O included
     feats = _W["ex"].extract(img, msk)
     if _W["device"] == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -163,6 +174,7 @@ def _fastrad_task(case_id: str, img_path: str, mask_path: str):
 def _load_pyrad_input(path: str):
     if os.path.isdir(path):
         import SimpleITK as sitk
+
         reader = sitk.ImageSeriesReader()
         dicom_names = reader.GetGDCMSeriesFileNames(path)
         reader.SetFileNames(dicom_names)
@@ -171,9 +183,10 @@ def _load_pyrad_input(path: str):
 
 
 def _pyrad_init(cfg: str, warm_img: str, warm_mask: str):
-    _single_thread_env()   # set before radiomics/numpy import (spawned process)
+    _single_thread_env()  # set before radiomics/numpy import (spawned process)
     _quiet_logs()
     from radiomics import featureextractor, setVerbosity
+
     setVerbosity(40)
     _W["ex"] = featureextractor.RadiomicsFeatureExtractor(cfg)
     img_in = _load_pyrad_input(warm_img)
@@ -186,7 +199,12 @@ def _pyrad_task(case_id: str, img_path: str, mask_path: str):
     img_in = _load_pyrad_input(img_path)
     mask_in = _load_pyrad_input(mask_path)
     _W["ex"].execute(img_in, mask_in)
-    return case_id, time.perf_counter() - t0, os.getpid(), {}  # features not needed here
+    return (
+        case_id,
+        time.perf_counter() - t0,
+        os.getpid(),
+        {},
+    )  # features not needed here
 
 
 def _ready(_):
@@ -198,10 +216,12 @@ def _ready(_):
 # Profiling pass: per-case peak VRAM, CUDA context cost, reference features
 # --------------------------------------------------------------------------
 
+
 def _profile(cases: list[dict], cfg: str) -> dict:
     """Profiles each UNIQUE input once; replicated case_ids reuse its result."""
     _quiet_logs()
     import torch
+
     torch.set_num_threads(1)
 
     if not torch.cuda.is_available():
@@ -240,14 +260,17 @@ def _profile(cases: list[dict], cfg: str) -> dict:
             feats = ex.extract(img, msk)
             torch.cuda.synchronize()
             seen[key] = (
-                {"max_reserved": torch.cuda.max_memory_reserved(),
-                 "max_allocated": torch.cuda.max_memory_allocated()},
+                {
+                    "max_reserved": torch.cuda.max_memory_reserved(),
+                    "max_allocated": torch.cuda.max_memory_allocated(),
+                },
                 _to_float_dict(feats),
             )
         peaks[c["case_id"]], ref[c["case_id"]] = seen[key]
     return {
         "total_bytes": total,
-        "free_bytes_before_any_fastrad": free_after_ctx + ctx,  # what K workers can share
+        "free_bytes_before_any_fastrad": free_after_ctx
+        + ctx,  # what K workers can share
         "ctx_bytes": ctx,
         "peaks": peaks,
         "reference_features": ref,
@@ -269,14 +292,18 @@ def auto_workers(prof: dict, k_max: int, alpha: float = 0.9) -> int:
 # Timed cohort run
 # --------------------------------------------------------------------------
 
+
 def run_cohort(kind: str, workers: int, cases: list[dict], cfg: str, retries: int = 2):
     """Runs one timed cohort pass; retries if a worker dies (e.g. during CUDA init)."""
     from concurrent.futures.process import BrokenProcessPool
+
     for attempt in range(retries + 1):
         try:
             return _run_cohort_once(kind, workers, cases, cfg)
         except BrokenProcessPool as e:
-            print(f"  ! worker pool broke ({kind}, workers={workers}, attempt {attempt + 1}): {e}")
+            print(
+                f"  ! worker pool broke ({kind}, workers={workers}, attempt {attempt + 1}): {e}"
+            )
             time.sleep(10)
     raise RuntimeError(f"{kind} with {workers} workers failed {retries + 1} times")
 
@@ -286,15 +313,24 @@ def _run_cohort_once(kind: str, workers: int, cases: list[dict], cfg: str):
     ctx = mp.get_context("spawn")
     first = cases[0]
     if kind == "pyradiomics":
-        init, initargs, task = _pyrad_init, (cfg, first["pr_image"], first["pr_mask"]), _pyrad_task
+        init, initargs, task = (
+            _pyrad_init,
+            (cfg, first["pr_image"], first["pr_mask"]),
+            _pyrad_task,
+        )
         args = [(c["case_id"], c["pr_image"], c["pr_mask"]) for c in cases]
     else:
         device = "cuda" if kind == "fastrad_gpu" else "cpu"
-        init, initargs, task = _fastrad_init, (device, cfg, first["fr_image"], first["fr_mask"]), _fastrad_task
+        init, initargs, task = (
+            _fastrad_init,
+            (device, cfg, first["fr_image"], first["fr_mask"]),
+            _fastrad_task,
+        )
         args = [(c["case_id"], c["fr_image"], c["fr_mask"]) for c in cases]
 
-    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
-                             initializer=init, initargs=initargs) as pool:
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=ctx, initializer=init, initargs=initargs
+    ) as pool:
         # Force every worker to start and finish its warm-up before timing.
         pids = set()
         attempts = 0
@@ -347,13 +383,15 @@ def discover_cases(project_root: Path) -> list[dict]:
             img_path = case_dir / "image.nrrd"
             mask_path = case_dir / "label.nrrd"
             if img_path.exists() and mask_path.exists():
-                cases.append({
-                    "case_id": case_dir.name,
-                    "fr_image": str(img_path),
-                    "fr_mask": str(mask_path),
-                    "pr_image": str(img_path),
-                    "pr_mask": str(mask_path),
-                })
+                cases.append(
+                    {
+                        "case_id": case_dir.name,
+                        "fr_image": str(img_path),
+                        "fr_mask": str(mask_path),
+                        "pr_image": str(img_path),
+                        "pr_mask": str(mask_path),
+                    }
+                )
     if cases:
         return cases
 
@@ -361,15 +399,20 @@ def discover_cases(project_root: Path) -> list[dict]:
     single_img = project_root / "tests" / "fixtures" / "tcia" / "lung1_image.nrrd"
     single_mask = project_root / "tests" / "fixtures" / "tcia" / "lung1_label.nrrd"
     if single_img.exists() and single_mask.exists():
-        print("WARNING: No multi-case cohort found. Falling back to 20 synthetic "
-              "re-extractions of LUNG1-001 to validate throughput mechanics.")
-        return [{
-            "case_id": f"LUNG1-001-rep{i}",
-            "fr_image": str(single_img),
-            "fr_mask": str(single_mask),
-            "pr_image": str(single_img),
-            "pr_mask": str(single_mask),
-        } for i in range(20)]
+        print(
+            "WARNING: No multi-case cohort found. Falling back to 20 synthetic "
+            "re-extractions of LUNG1-001 to validate throughput mechanics."
+        )
+        return [
+            {
+                "case_id": f"LUNG1-001-rep{i}",
+                "fr_image": str(single_img),
+                "fr_mask": str(single_mask),
+                "pr_image": str(single_img),
+                "pr_mask": str(single_mask),
+            }
+            for i in range(20)
+        ]
 
     return []
 
@@ -433,13 +476,17 @@ def run(
             for r in range(replicate)
             for c in base_cases
         ]
-        print(f"Replicated {len(base_cases)} unique cases x{replicate} "
-              f"= {len(cases)} tasks")
+        print(
+            f"Replicated {len(base_cases)} unique cases x{replicate} "
+            f"= {len(cases)} tasks"
+        )
 
     print(f"{len(cases)} cases")
     if len(cases) < 2 * cpu_workers:
-        print(f"WARNING: fewer than 2 cases per CPU worker ({len(cases)} cases, "
-              f"{cpu_workers} workers); the CPU baseline will be dominated by the slowest case.")
+        print(
+            f"WARNING: fewer than 2 cases per CPU worker ({len(cases)} cases, "
+            f"{cpu_workers} workers); the CPU baseline will be dominated by the slowest case."
+        )
 
     # Profiling runs in its own process so this process never holds a CUDA context.
     with ProcessPoolExecutor(1, mp_context=mp.get_context("spawn")) as p:
@@ -448,21 +495,31 @@ def run(
     has_cuda = prof.get("cuda_available", False)
     if has_cuda:
         k_auto = auto_workers(prof, max_k, alpha)
-        gib = 1024 ** 3
-        print(f"ctx={prof['ctx_bytes']/gib:.2f} GiB  "
-              f"peak={max(v['max_reserved'] for v in prof['peaks'].values())/gib:.2f} GiB  "
-              f"free={prof['free_bytes_before_any_fastrad']/gib:.2f} GiB  ->  K_auto={k_auto}")
+        gib = 1024**3
+        print(
+            f"ctx={prof['ctx_bytes'] / gib:.2f} GiB  "
+            f"peak={max(v['max_reserved'] for v in prof['peaks'].values()) / gib:.2f} GiB  "
+            f"free={prof['free_bytes_before_any_fastrad'] / gib:.2f} GiB  ->  K_auto={k_auto}"
+        )
 
         configs = [("pyradiomics", cpu_workers)]
-        ks = sorted({int(k) for k in k_list.split(",") if int(k) <= k_auto} | {1, k_auto})
+        ks = sorted(
+            {int(k) for k in k_list.split(",") if int(k) <= k_auto} | {1, k_auto}
+        )
         configs += [("fastrad_gpu", k) for k in ks]
-        configs += [("fastrad_cpu", int(w)) for w in fastrad_cpu_workers.split(",") if w.strip()]
+        configs += [
+            ("fastrad_cpu", int(w)) for w in fastrad_cpu_workers.split(",") if w.strip()
+        ]
     else:
         k_auto = 1
-        print("NOTICE: CUDA is not available on this system. "
-              "Running PyRadiomics CPU baseline vs fastrad CPU sequential baseline.")
+        print(
+            "NOTICE: CUDA is not available on this system. "
+            "Running PyRadiomics CPU baseline vs fastrad CPU sequential baseline."
+        )
         configs = [("pyradiomics", cpu_workers), ("fastrad_cpu", 1)]
-        configs += [("fastrad_cpu", int(w)) for w in fastrad_cpu_workers.split(",") if w.strip()]
+        configs += [
+            ("fastrad_cpu", int(w)) for w in fastrad_cpu_workers.split(",") if w.strip()
+        ]
 
     out_json = out_prefix + ".json"
     out_csv = out_prefix + ".csv"
@@ -470,24 +527,49 @@ def run(
     prof_out = {k: v for k, v in prof.items() if k != "reference_features"}
 
     def save(summary):
-        pyrad = [s["median_scans_per_min"] for s in summary if s["config"] == "pyradiomics"]
+        pyrad = [
+            s["median_scans_per_min"] for s in summary if s["config"] == "pyradiomics"
+        ]
         base = pyrad[0] if pyrad and pyrad[0] > 0 else 1.0
         for s in summary:
             s["ratio_vs_pyradiomics"] = s["median_scans_per_min"] / base
             s["scans_per_min_per_worker"] = s["median_scans_per_min"] / s["workers"]
         with open(out_json, "w", encoding="utf-8") as fh:
-            json.dump({"n_cases": len(cases), "k_auto": k_auto, "alpha": alpha,
-                       "profile": prof_out, "summary": summary}, fh, indent=2)
+            json.dump(
+                {
+                    "n_cases": len(cases),
+                    "k_auto": k_auto,
+                    "alpha": alpha,
+                    "profile": prof_out,
+                    "summary": summary,
+                },
+                fh,
+                indent=2,
+            )
         with open(out_csv, "w", newline="", encoding="utf-8") as fh:
             wr = csv.writer(fh)
-            wr.writerow(["config", "workers", "median_scans_per_min", "ratio_vs_pyradiomics",
-                         "scans_per_min_per_worker", "max_abs_feature_diff_vs_gpu_reference"])
+            wr.writerow(
+                [
+                    "config",
+                    "workers",
+                    "median_scans_per_min",
+                    "ratio_vs_pyradiomics",
+                    "scans_per_min_per_worker",
+                    "max_abs_feature_diff_vs_gpu_reference",
+                ]
+            )
             for s in summary:
                 d = s["max_abs_feature_diff_vs_sequential"]
-                wr.writerow([s["config"], s["workers"], f"{s['median_scans_per_min']:.1f}",
-                             f"{s['ratio_vs_pyradiomics']:.2f}",
-                             f"{s['scans_per_min_per_worker']:.1f}",
-                             f"{d:.2e}" if d is not None else "N/A"])
+                wr.writerow(
+                    [
+                        s["config"],
+                        s["workers"],
+                        f"{s['median_scans_per_min']:.1f}",
+                        f"{s['ratio_vs_pyradiomics']:.2f}",
+                        f"{s['scans_per_min_per_worker']:.1f}",
+                        f"{d:.2e}" if d is not None else "N/A",
+                    ]
+                )
 
     summary = []
     for kind, w in configs:
@@ -495,23 +577,32 @@ def run(
         for r in range(repeats):
             res, feats = run_cohort(kind, w, cases, str(cfg_path))
             if kind.startswith("fastrad"):
-                max_diff = max(max_diff, max_abs_diff(prof["reference_features"], feats))
+                max_diff = max(
+                    max_diff, max_abs_diff(prof["reference_features"], feats)
+                )
             runs.append(res)
-            print(f"{kind:12s} workers={w:3d} rep={r}  {res['scans_per_min']:.1f} scans/min")
+            print(
+                f"{kind:12s} workers={w:3d} rep={r}  {res['scans_per_min']:.1f} scans/min"
+            )
         spm = [x["scans_per_min"] for x in runs]
-        summary.append({
-            "config": kind,
-            "workers": w,
-            "k_auto": w == k_auto and kind == "fastrad_gpu",
-            "median_scans_per_min": statistics.median(spm),
-            "min_scans_per_min": min(spm),
-            "max_scans_per_min": max(spm),
-            # per-task wall time inside a worker (load + extract), median over all tasks/reps
-            "median_case_s": statistics.median(
-                t for x in runs for t in x["per_case_s"].values()),
-            "max_abs_feature_diff_vs_sequential": max_diff if kind.startswith("fastrad") else None,
-            "runs": runs,
-        })
+        summary.append(
+            {
+                "config": kind,
+                "workers": w,
+                "k_auto": w == k_auto and kind == "fastrad_gpu",
+                "median_scans_per_min": statistics.median(spm),
+                "min_scans_per_min": min(spm),
+                "max_scans_per_min": max(spm),
+                # per-task wall time inside a worker (load + extract), median over all tasks/reps
+                "median_case_s": statistics.median(
+                    t for x in runs for t in x["per_case_s"].values()
+                ),
+                "max_abs_feature_diff_vs_sequential": max_diff
+                if kind.startswith("fastrad")
+                else None,
+                "runs": runs,
+            }
+        )
         save(summary)  # partial results survive a later crash
 
     save(summary)
@@ -522,6 +613,7 @@ def run(
     if Path(out_csv).resolve() != root_csv.resolve():
         try:
             import shutil
+
             shutil.copyfile(out_csv, root_csv)
         except OSError:
             pass
@@ -556,11 +648,18 @@ def main():
     )
     ap.add_argument("--cpu-workers", type=int, default=32)
     ap.add_argument("--k-list", default="1,2,3,4", help="extra K values besides K_auto")
-    ap.add_argument("--replicate", type=int, default=1,
-                    help="repeat each case N times to form a larger cohort")
-    ap.add_argument("--fastrad-cpu-workers", default="",
-                    help="comma-separated process counts for fastrad on CPU, e.g. '16,32' "
-                         "(same-hardware comparison against PyRadiomics)")
+    ap.add_argument(
+        "--replicate",
+        type=int,
+        default=1,
+        help="repeat each case N times to form a larger cohort",
+    )
+    ap.add_argument(
+        "--fastrad-cpu-workers",
+        default="",
+        help="comma-separated process counts for fastrad on CPU, e.g. '16,32' "
+        "(same-hardware comparison against PyRadiomics)",
+    )
     ap.add_argument("--k-max", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--alpha", type=float, default=0.9)
     ap.add_argument("--repeats", type=int, default=3)

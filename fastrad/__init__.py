@@ -14,7 +14,7 @@ __all__ = [
     "MedicalImage",
     "VoxelFeatureExtractor",
     "apply_builtin_filters",
-    "load_and_align"
+    "load_and_align",
 ]
 
 __version__ = "1.1.0"

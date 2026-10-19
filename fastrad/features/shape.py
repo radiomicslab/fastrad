@@ -6,10 +6,12 @@ from fastrad.features.shape_utils import calculate_mesh_features
 from fastrad.settings import FeatureSettings
 
 
-def compute(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings) -> dict[str, float]:
+def compute(
+    image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: FeatureSettings
+) -> dict[str, float]:
     device = mask_tensor.device  # already on the extractor's resolved device
     spacing = settings.spacing
-    
+
     # Move mask to device
     mask_tensor = mask_tensor.to(device)
 
@@ -24,59 +26,84 @@ def compute(image_tensor: torch.Tensor, mask_tensor: torch.Tensor, settings: Fea
         return {}
     lo, hi = nz.min(dim=0).values.tolist(), (nz.max(dim=0).values + 1).tolist()
     mesh_mask = torch.nn.functional.pad(
-        (mask_tensor[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] > 0.5).to(torch.float32), (1, 1, 1, 1, 1, 1)
+        (mask_tensor[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]] > 0.5).to(
+            torch.float32
+        ),
+        (1, 1, 1, 1, 1, 1),
     )
     # Note: spacing is provided in native order, assuming shape_utils expects (Z, Y, X)
     mesh_res = calculate_mesh_features(mesh_mask, spacing)
-    
+
     surface_area = mesh_res["SurfaceArea"]
     mesh_volume = mesh_res["MeshVolume"]
-    
+
     # 2. Voxel Features
     # Find all coordinates of voxels in the mask
-    coords = torch.nonzero(mask_tensor, as_tuple=False).to(torch.float64) # shape (N, 3)
+    coords = torch.nonzero(mask_tensor, as_tuple=False).to(
+        torch.float64
+    )  # shape (N, 3)
     Np = coords.shape[0]
-    
+
     if Np == 0:
         return {}
-        
+
     spacing_t = torch.tensor(spacing, device=device, dtype=torch.float64)
     voxel_volume_scalar = float(torch.prod(spacing_t))
     voxel_volume = Np * voxel_volume_scalar
-    
+
     # PCA
     physical_coords = coords * spacing_t
-    physical_coords -= torch.mean(physical_coords, dim=0) # Centered at 0
+    physical_coords -= torch.mean(physical_coords, dim=0)  # Centered at 0
     physical_coords /= math.sqrt(Np)
-    
+
     covariance = torch.matmul(physical_coords.T, physical_coords)
     eigenvalues = torch.linalg.eigvalsh(covariance)
-    
+
     # Address machine errors
     eigenvalues = torch.where(
-        (eigenvalues < 0) & (eigenvalues > -1e-10), 
-        torch.tensor(0.0, dtype=torch.float64, device=device), 
-        eigenvalues
+        (eigenvalues < 0) & (eigenvalues > -1e-10),
+        torch.tensor(0.0, dtype=torch.float64, device=device),
+        eigenvalues,
     )
-    eigenvalues, _ = torch.sort(eigenvalues) # small to large
+    eigenvalues, _ = torch.sort(eigenvalues)  # small to large
     eigen_l, eigen_m, eigen_h = eigenvalues[0], eigenvalues[1], eigenvalues[2]
-    
+
     # Base features
     surface_volume_ratio = surface_area / mesh_volume if mesh_volume > 0 else 0.0
-    
-    sphericity = (36.0 * math.pi * (mesh_volume ** 2.0)) ** (1.0 / 3.0) / surface_area if surface_area > 0 else 0.0
-    spherical_disproportion = surface_area / ((36.0 * math.pi * (mesh_volume ** 2.0)) ** (1.0 / 3.0)) if mesh_volume > 0 else 0.0
-    
-    compactness1 = mesh_volume / (math.sqrt(math.pi) * (surface_area ** (2.0 / 3.0))) if surface_area > 0 else 0.0
-    compactness2 = 36.0 * math.pi * (mesh_volume ** 2.0) / (surface_area ** 3.0) if surface_area > 0 else 0.0
-    
+
+    sphericity = (
+        (36.0 * math.pi * (mesh_volume**2.0)) ** (1.0 / 3.0) / surface_area
+        if surface_area > 0
+        else 0.0
+    )
+    spherical_disproportion = (
+        surface_area / ((36.0 * math.pi * (mesh_volume**2.0)) ** (1.0 / 3.0))
+        if mesh_volume > 0
+        else 0.0
+    )
+
+    compactness1 = (
+        mesh_volume / (math.sqrt(math.pi) * (surface_area ** (2.0 / 3.0)))
+        if surface_area > 0
+        else 0.0
+    )
+    compactness2 = (
+        36.0 * math.pi * (mesh_volume**2.0) / (surface_area**3.0)
+        if surface_area > 0
+        else 0.0
+    )
+
     major_axis = math.sqrt(eigen_h) * 4.0 if eigen_h >= 0 else math.nan
     minor_axis = math.sqrt(eigen_m) * 4.0 if eigen_m >= 0 else math.nan
     least_axis = math.sqrt(eigen_l) * 4.0 if eigen_l >= 0 else math.nan
-    
-    elongation = math.sqrt(eigen_m / eigen_h) if (eigen_h > 0 and eigen_m >= 0) else math.nan
-    flatness = math.sqrt(eigen_l / eigen_h) if (eigen_h > 0 and eigen_l >= 0) else math.nan
-    
+
+    elongation = (
+        math.sqrt(eigen_m / eigen_h) if (eigen_h > 0 and eigen_m >= 0) else math.nan
+    )
+    flatness = (
+        math.sqrt(eigen_l / eigen_h) if (eigen_h > 0 and eigen_l >= 0) else math.nan
+    )
+
     return {
         "shape:voxel_volume": float(voxel_volume),
         "shape:mesh_volume": float(mesh_volume),
